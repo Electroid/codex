@@ -20,10 +20,26 @@ pub(crate) struct FileSearchPopup {
     pending_query: String,
     /// When `true` we are still waiting for results for `pending_query`.
     waiting: bool,
-    /// Cached matches; paths relative to the search dir.
+    /// All fetched matches from the search (up to 1000); paths relative to the search dir.
     matches: Vec<FileMatch>,
+    /// Number of matches available for display. Set to matches.len() when results arrive.
+    /// Used for bounds checking during scrolling.
+    displayed_count: usize,
     /// Shared selection/scroll state.
     state: ScrollState,
+}
+
+fn to_display_row(m: &FileMatch) -> GenericDisplayRow {
+    GenericDisplayRow {
+        name: m.path.clone(),
+        match_indices: m
+            .indices
+            .as_ref()
+            .map(|v| v.iter().map(|&i| i as usize).collect()),
+        is_current: false,
+        display_shortcut: None,
+        description: None,
+    }
 }
 
 impl FileSearchPopup {
@@ -31,70 +47,76 @@ impl FileSearchPopup {
         Self {
             display_query: String::new(),
             pending_query: String::new(),
-            waiting: true,
+            waiting: false,
             matches: Vec::new(),
+            displayed_count: 0,
             state: ScrollState::new(),
         }
     }
 
     /// Update the query and reset state to *waiting*.
     pub(crate) fn set_query(&mut self, query: &str) {
-        if query == self.pending_query {
-            return;
-        }
-
         // Determine if current matches are still relevant.
         let keep_existing = query.starts_with(&self.display_query);
 
-        self.pending_query.clear();
-        self.pending_query.push_str(query);
+        self.pending_query = query.to_string();
 
-        self.waiting = true; // waiting for new results
+        self.waiting = true;
 
         if !keep_existing {
             self.matches.clear();
+            self.displayed_count = 0;
             self.state.reset();
         }
     }
 
-    /// Put the popup into an "idle" state used for an empty query (just "@").
-    /// Shows a hint instead of matches until the user types more characters.
-    pub(crate) fn set_empty_prompt(&mut self) {
-        self.display_query.clear();
-        self.pending_query.clear();
-        self.waiting = false;
-        self.matches.clear();
-        // Reset selection/scroll state when showing the empty prompt.
-        self.state.reset();
-    }
-
-    /// Replace matches when a `FileSearchResult` arrives.
-    /// Replace matches. Only applied when `query` matches `pending_query`.
+    /// Replace matches when a `FileSearchResult` arrives. Only applied when `query` matches `pending_query`.
+    /// All results are immediately available for scrolling.
     pub(crate) fn set_matches(&mut self, query: &str, matches: Vec<FileMatch>) {
-        if query != self.pending_query {
+        if query != self.pending_query && !(query.is_empty() && self.pending_query.is_empty()) {
             return; // stale
         }
 
         self.display_query = query.to_string();
         self.matches = matches;
         self.waiting = false;
-        let len = self.matches.len();
-        self.state.clamp_selection(len);
-        self.state.ensure_visible(len, len.min(MAX_POPUP_ROWS));
+
+        // Show all results immediately (up to 1000 from backend)
+        self.displayed_count = self.matches.len();
+
+        // Ensure selection stays within bounds
+        self.state.clamp_selection(self.displayed_count);
     }
 
-    /// Move selection cursor up.
+    /// Maintains invariant: selected_idx is always in [scroll_top, scroll_top + VISIBLE_COUNT)
+    fn ensure_selection_visible(&mut self) {
+        const VISIBLE_COUNT: usize = MAX_POPUP_ROWS;
+
+        if let Some(sel) = self.state.selected_idx {
+            if sel < self.state.scroll_top {
+                self.state.scroll_top = sel;
+            } else if sel >= self.state.scroll_top + VISIBLE_COUNT {
+                self.state.scroll_top = sel + 1 - VISIBLE_COUNT;
+            }
+        } else {
+            self.state.scroll_top = 0;
+        }
+    }
+
     pub(crate) fn move_up(&mut self) {
-        let len = self.matches.len();
-        self.state.move_up_wrap(len);
-        self.state.ensure_visible(len, len.min(MAX_POPUP_ROWS));
+        if self.displayed_count == 0 {
+            return;
+        }
+        self.state.move_up(self.displayed_count);
+        self.ensure_selection_visible();
     }
 
-    /// Move selection cursor down.
     pub(crate) fn move_down(&mut self) {
-        let len = self.matches.len();
-        self.state.move_down_wrap(len);
-        self.state.ensure_visible(len, len.min(MAX_POPUP_ROWS));
+        if self.displayed_count == 0 {
+            return;
+        }
+        self.state.move_down(self.displayed_count);
+        self.ensure_selection_visible();
     }
 
     pub(crate) fn selected_match(&self) -> Option<&str> {
@@ -105,36 +127,22 @@ impl FileSearchPopup {
     }
 
     pub(crate) fn calculate_required_height(&self) -> u16 {
-        // Row count depends on whether we already have matches. If no matches
-        // yet (e.g. initial search or query with no results) reserve a single
-        // row so the popup is still visible. When matches are present we show
-        // up to MAX_RESULTS regardless of the waiting flag so the list
-        // remains stable while a newer search is in-flight.
-
-        self.matches.len().clamp(1, MAX_POPUP_ROWS) as u16
+        // File paths don't wrap (they're truncated with ellipsis), so each match
+        // is exactly one row. Return the number of DISPLAYED matches clamped to MAX_POPUP_ROWS,
+        // or 1 if empty to keep the popup visible.
+        self.displayed_count.clamp(1, MAX_POPUP_ROWS) as u16
     }
 }
 
 impl WidgetRef for &FileSearchPopup {
     fn render_ref(&self, area: Rect, buf: &mut Buffer) {
-        // Convert matches to GenericDisplayRow, translating indices to usize at the UI boundary.
-        let rows_all: Vec<GenericDisplayRow> = if self.matches.is_empty() {
-            Vec::new()
-        } else {
-            self.matches
-                .iter()
-                .map(|m| GenericDisplayRow {
-                    name: m.path.clone(),
-                    match_indices: m
-                        .indices
-                        .as_ref()
-                        .map(|v| v.iter().map(|&i| i as usize).collect()),
-                    is_current: false,
-                    display_shortcut: None,
-                    description: None,
-                })
-                .collect()
-        };
+        // Only convert displayed items to rows (incremental loading)
+        let rows_all: Vec<GenericDisplayRow> = self
+            .matches
+            .iter()
+            .take(self.displayed_count)
+            .map(to_display_row)
+            .collect();
 
         let empty_message = if self.waiting {
             "loading..."
@@ -150,5 +158,198 @@ impl WidgetRef for &FileSearchPopup {
             MAX_POPUP_ROWS,
             empty_message,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_match(path: &str) -> FileMatch {
+        FileMatch {
+            score: 0,
+            path: path.to_string(),
+            indices: None,
+        }
+    }
+
+    #[test]
+    fn test_scroll_down_stays_within_window() {
+        let mut popup = FileSearchPopup::new();
+        let matches: Vec<FileMatch> = (0..20)
+            .map(|i| make_match(&format!("file{i}.rs")))
+            .collect();
+
+        popup.set_query("test");
+        popup.set_matches("test", matches);
+
+        assert_eq!(popup.state.selected_idx, Some(0));
+        assert_eq!(popup.state.scroll_top, 0);
+
+        // MAX_POPUP_ROWS = 8, so items 0-7 should have scroll_top = 0
+        for i in 1..8 {
+            popup.move_down();
+            assert_eq!(popup.state.selected_idx, Some(i));
+            assert_eq!(
+                popup.state.scroll_top, 0,
+                "scroll_top should be 0 for items 0-7"
+            );
+        }
+
+        popup.move_down();
+        assert_eq!(popup.state.selected_idx, Some(8));
+        assert_eq!(
+            popup.state.scroll_top, 1,
+            "scroll_top should be 1 when selection is at 8"
+        );
+
+        popup.move_down();
+        assert_eq!(popup.state.selected_idx, Some(9));
+        assert_eq!(
+            popup.state.scroll_top, 2,
+            "scroll_top should be 2 when selection is at 9"
+        );
+    }
+
+    #[test]
+    fn test_scroll_up_basic() {
+        let mut popup = FileSearchPopup::new();
+        let matches: Vec<FileMatch> = (0..20)
+            .map(|i| make_match(&format!("file{i}.rs")))
+            .collect();
+
+        popup.set_query("test");
+        popup.set_matches("test", matches);
+        popup.state.selected_idx = Some(5);
+        popup.state.scroll_top = 2;
+
+        popup.move_up();
+        assert_eq!(popup.state.selected_idx, Some(4));
+        assert_eq!(popup.state.scroll_top, 2);
+
+        popup.move_up();
+        popup.move_up();
+        assert_eq!(popup.state.selected_idx, Some(2));
+        assert_eq!(popup.state.scroll_top, 2);
+
+        popup.move_up();
+        assert_eq!(popup.state.selected_idx, Some(1));
+        assert_eq!(popup.state.scroll_top, 1);
+    }
+
+    #[test]
+    fn test_set_matches_clamps_selection() {
+        let mut popup = FileSearchPopup::new();
+        let matches1: Vec<FileMatch> = (0..10)
+            .map(|i| make_match(&format!("file{i}.rs")))
+            .collect();
+
+        popup.set_query("test");
+        popup.set_matches("test", matches1);
+        popup.state.selected_idx = Some(9);
+
+        let matches2: Vec<FileMatch> = (0..5).map(|i| make_match(&format!("file{i}.rs"))).collect();
+        popup.set_query("test2");
+        popup.set_matches("test2", matches2);
+
+        assert_eq!(popup.state.selected_idx, Some(4));
+    }
+
+    #[test]
+    fn test_invariant_always_maintained() {
+        let mut popup = FileSearchPopup::new();
+        let matches: Vec<FileMatch> = (0..20)
+            .map(|i| make_match(&format!("file{i}.rs")))
+            .collect();
+
+        popup.set_query("test");
+        popup.set_matches("test", matches);
+
+        const VISIBLE_COUNT: usize = MAX_POPUP_ROWS;
+
+        // Test invariant after many down movements
+        for _ in 0..15 {
+            popup.move_down();
+            if let Some(sel) = popup.state.selected_idx {
+                assert!(
+                    sel >= popup.state.scroll_top && sel < popup.state.scroll_top + VISIBLE_COUNT,
+                    "INVARIANT VIOLATED: selection {} not in [scroll_top={}, scroll_top+{})",
+                    sel,
+                    popup.state.scroll_top,
+                    VISIBLE_COUNT
+                );
+            }
+        }
+
+        // Test invariant after moving back up
+        for _ in 0..10 {
+            popup.move_up();
+            if let Some(sel) = popup.state.selected_idx {
+                assert!(
+                    sel >= popup.state.scroll_top && sel < popup.state.scroll_top + VISIBLE_COUNT,
+                    "INVARIANT VIOLATED: selection {} not in [scroll_top={}, scroll_top+{})",
+                    sel,
+                    popup.state.scroll_top,
+                    VISIBLE_COUNT
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_no_skipping_on_scroll() {
+        let mut popup = FileSearchPopup::new();
+        let matches: Vec<FileMatch> = (0..20)
+            .map(|i| make_match(&format!("file{i}.rs")))
+            .collect();
+
+        popup.set_query("test");
+        popup.set_matches("test", matches);
+
+        let mut prev_sel = popup
+            .state
+            .selected_idx
+            .expect("Expected initial selection to be set");
+
+        for _ in 0..15 {
+            popup.move_down();
+            let curr_sel = popup
+                .state
+                .selected_idx
+                .expect("Expected selection to remain set during navigation");
+            assert_eq!(
+                curr_sel,
+                prev_sel + 1,
+                "Selection skipped from {prev_sel} to {curr_sel}"
+            );
+            prev_sel = curr_sel;
+        }
+    }
+
+    #[test]
+    fn test_all_results_scrollable() {
+        let mut popup = FileSearchPopup::new();
+        // Create 100 matches to test scrolling through all results
+        let matches: Vec<FileMatch> = (0..100)
+            .map(|i| make_match(&format!("file{i}.rs")))
+            .collect();
+
+        popup.set_query("test");
+        popup.set_matches("test", matches);
+
+        // All results should be immediately available
+        assert_eq!(popup.displayed_count, 100);
+        assert_eq!(popup.matches.len(), 100);
+        assert_eq!(popup.state.selected_idx, Some(0));
+
+        // Should be able to scroll through all 100 items
+        for i in 1..100 {
+            popup.move_down();
+            assert_eq!(popup.state.selected_idx, Some(i));
+        }
+
+        // Should stop at last item
+        popup.move_down();
+        assert_eq!(popup.state.selected_idx, Some(99));
     }
 }

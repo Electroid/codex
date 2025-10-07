@@ -35,6 +35,34 @@ impl ScrollState {
         }
     }
 
+    /// Move selection up by one, stopping at the top.
+    pub fn move_up(&mut self, len: usize) {
+        if len == 0 {
+            self.selected_idx = None;
+            self.scroll_top = 0;
+            return;
+        }
+        self.selected_idx = Some(match self.selected_idx {
+            Some(idx) if idx > 0 => idx - 1,
+            Some(idx) => idx, // Stay at top
+            None => 0,
+        });
+    }
+
+    /// Move selection down by one, stopping at the bottom.
+    pub fn move_down(&mut self, len: usize) {
+        if len == 0 {
+            self.selected_idx = None;
+            self.scroll_top = 0;
+            return;
+        }
+        self.selected_idx = Some(match self.selected_idx {
+            Some(idx) if idx + 1 < len => idx + 1,
+            Some(idx) => idx, // Stay at bottom
+            None => 0,
+        });
+    }
+
     /// Move selection up by one, wrapping to the bottom when necessary.
     pub fn move_up_wrap(&mut self, len: usize) {
         if len == 0 {

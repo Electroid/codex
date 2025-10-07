@@ -130,6 +130,10 @@ pub fn run(
     cancel_flag: Arc<AtomicBool>,
     compute_indices: bool,
 ) -> anyhow::Result<FileSearchResults> {
+    if pattern_text.is_empty() {
+        return list_current_directory(search_directory, limit);
+    }
+
     let pattern = create_pattern(pattern_text);
     // Create one BestMatchesList per worker thread so that each worker can
     // operate independently. The results across threads will be merged when
@@ -187,7 +191,7 @@ pub fn run(
 
         Box::new(move |entry| {
             if let Some(path) = get_file_path(&entry, search_directory) {
-                best_list.insert(path);
+                best_list.insert(&path);
             }
 
             processed += 1;
@@ -199,22 +203,17 @@ pub fn run(
         })
     });
 
-    fn get_file_path<'a>(
-        entry_result: &'a Result<ignore::DirEntry, ignore::Error>,
+    fn get_file_path(
+        entry_result: &Result<ignore::DirEntry, ignore::Error>,
         search_directory: &std::path::Path,
-    ) -> Option<&'a str> {
-        let entry = match entry_result {
-            Ok(e) => e,
-            Err(_) => return None,
-        };
-        if entry.file_type().is_some_and(|ft| ft.is_dir()) {
-            return None;
-        }
+    ) -> Option<String> {
+        let entry = entry_result.as_ref().ok()?;
         let path = entry.path();
-        match path.strip_prefix(search_directory) {
-            Ok(rel_path) => rel_path.to_str(),
-            Err(_) => None,
-        }
+        let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
+        let rel_path = path.strip_prefix(search_directory).ok()?;
+        let path_str = rel_path.to_str()?;
+
+        Some(format_path(path_str, is_dir))
     }
 
     // If the cancel flag is set, we return early with an empty result.
@@ -384,6 +383,54 @@ fn create_pattern(pattern: &str) -> Pattern {
         Normalization::Smart,
         AtomKind::Fuzzy,
     )
+}
+
+fn format_path(path_str: &str, is_dir: bool) -> String {
+    if is_dir && !path_str.is_empty() {
+        format!("{path_str}{}", std::path::MAIN_SEPARATOR)
+    } else {
+        path_str.to_string()
+    }
+}
+
+fn list_current_directory(
+    search_directory: &Path,
+    limit: NonZero<usize>,
+) -> anyhow::Result<FileSearchResults> {
+    let read_dir = std::fs::read_dir(search_directory)?;
+
+    let mut entries: Vec<FileMatch> = read_dir
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let file_type = entry.file_type().ok()?;
+            let path = entry.path();
+            let rel_path = path.strip_prefix(search_directory).ok()?;
+            let path_str = rel_path.to_str()?;
+
+            Some(FileMatch {
+                score: 0,
+                path: format_path(path_str, file_type.is_dir()),
+                indices: None,
+            })
+        })
+        .take(limit.get())
+        .collect();
+
+    entries.sort_by(|a, b| {
+        let a_is_dir = a.path.ends_with(std::path::MAIN_SEPARATOR);
+        let b_is_dir = b.path.ends_with(std::path::MAIN_SEPARATOR);
+        match (a_is_dir, b_is_dir) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.path.cmp(&b.path),
+        }
+    });
+
+    let total_count = entries.len();
+    Ok(FileSearchResults {
+        matches: entries,
+        total_match_count: total_count,
+    })
 }
 
 #[cfg(test)]

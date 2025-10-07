@@ -1432,26 +1432,19 @@ impl ChatComposer {
             return;
         }
 
-        if !query.is_empty() {
+        // Only trigger a new search if the query has actually changed.
+        if self.current_file_query.as_ref() != Some(&query) {
             self.app_event_tx
                 .send(AppEvent::StartFileSearch(query.clone()));
         }
 
         match &mut self.active_popup {
             ActivePopup::File(popup) => {
-                if query.is_empty() {
-                    popup.set_empty_prompt();
-                } else {
-                    popup.set_query(&query);
-                }
+                popup.set_query(&query);
             }
             _ => {
                 let mut popup = FileSearchPopup::new();
-                if query.is_empty() {
-                    popup.set_empty_prompt();
-                } else {
-                    popup.set_query(&query);
-                }
+                popup.set_query(&query);
                 self.active_popup = ActivePopup::File(popup);
             }
         }

@@ -1,7 +1,5 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-// Note: Table-based layout previously used Constraint; the manual renderer
-// below no longer requires it.
 use ratatui::style::Color;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
@@ -18,11 +16,12 @@ pub(crate) struct GenericDisplayRow {
     pub name: String,
     pub display_shortcut: Option<KeyBinding>,
     pub match_indices: Option<Vec<usize>>, // indices to bold (char positions)
+    #[allow(dead_code)]
     pub is_current: bool,
     pub description: Option<String>, // optional grey text after the name
 }
 
-/// Compute a shared description-column start based on the widest visible name
+/// Compute a shared description-column start based on the widest name
 /// plus two spaces of padding. Ensures at least one column is left for the
 /// description.
 fn compute_desc_col(
@@ -50,9 +49,12 @@ fn compute_desc_col(
 /// at `desc_col`. Applies fuzzy-match bolding when indices are present and
 /// dims the description.
 fn build_full_line(row: &GenericDisplayRow, desc_col: usize) -> Line<'static> {
-    // Enforce single-line name: allow at most desc_col - 2 cells for name,
-    // reserving two spaces before the description column.
-    let name_limit = desc_col.saturating_sub(2);
+    const MAX_PATH_DISPLAY: usize = 4096;
+    let name_limit = row
+        .description
+        .as_ref()
+        .map(|_| desc_col.saturating_sub(2))
+        .unwrap_or(MAX_PATH_DISPLAY);
 
     let mut name_spans: Vec<Span> = Vec::with_capacity(row.name.len());
     let mut used_width = 0usize;
@@ -159,24 +161,7 @@ pub(crate) fn render_rows(
             break;
         }
 
-        let GenericDisplayRow {
-            name,
-            match_indices,
-            display_shortcut,
-            is_current: _is_current,
-            description,
-        } = row;
-
-        let mut full_line = build_full_line(
-            &GenericDisplayRow {
-                name: name.clone(),
-                match_indices: match_indices.clone(),
-                display_shortcut: *display_shortcut,
-                is_current: *_is_current,
-                description: description.clone(),
-            },
-            desc_col,
-        );
+        let mut full_line = build_full_line(row, desc_col);
         if Some(i) == state.selected_idx {
             // Match previous behavior: cyan + bold for the selected row.
             full_line.spans.iter_mut().for_each(|span| {

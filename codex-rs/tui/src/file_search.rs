@@ -31,7 +31,7 @@ use std::time::Duration;
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 
-const MAX_FILE_SEARCH_RESULTS: NonZeroUsize = NonZeroUsize::new(8).unwrap();
+const MAX_FILE_SEARCH_RESULTS: NonZeroUsize = NonZeroUsize::new(1000).unwrap();
 const NUM_FILE_SEARCH_THREADS: NonZeroUsize = NonZeroUsize::new(2).unwrap();
 
 /// How long to wait after a keystroke before firing the first search when none
@@ -83,14 +83,16 @@ impl FileSearchManager {
         {
             #[expect(clippy::unwrap_used)]
             let mut st = self.state.lock().unwrap();
-            if query == st.latest_query {
+
+            let query_changed = st.latest_query != query;
+
+            // Update latest query.
+            st.latest_query = query.clone();
+
+            if !query_changed && st.is_search_scheduled {
                 // No change, nothing to do.
                 return;
             }
-
-            // Update latest query.
-            st.latest_query.clear();
-            st.latest_query.push_str(&query);
 
             // If there is an in-flight search that is definitely obsolete,
             // cancel it now.
@@ -162,7 +164,7 @@ impl FileSearchManager {
         cancellation_token: Arc<AtomicBool>,
         search_state: Arc<Mutex<SearchState>>,
     ) {
-        let compute_indices = true;
+        let compute_indices = !query.is_empty();
         std::thread::spawn(move || {
             let matches = file_search::run(
                 &query,
