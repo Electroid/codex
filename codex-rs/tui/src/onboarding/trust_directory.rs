@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use codex_core::config::find_state_directory;
 use codex_core::config::set_project_trusted;
 use codex_core::git_info::resolve_root_git_project_for_trust;
 use crossterm::event::KeyCode;
@@ -145,7 +146,8 @@ impl TrustDirectoryWidget {
     fn handle_trust(&mut self) {
         let target =
             resolve_root_git_project_for_trust(&self.cwd).unwrap_or_else(|| self.cwd.clone());
-        if let Err(e) = set_project_trusted(&self.codex_home, &target) {
+        let state_dir = find_state_directory().unwrap_or_else(|_| self.codex_home.clone());
+        if let Err(e) = set_project_trusted(&state_dir, &target) {
             tracing::error!("Failed to set project trusted: {e:?}");
             self.error = Some(format!("Failed to set trust for {}: {e}", target.display()));
         }

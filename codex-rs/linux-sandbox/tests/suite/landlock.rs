@@ -94,6 +94,137 @@ async fn test_root_write() {
 }
 
 #[tokio::test]
+async fn test_git_folder_is_read_only() {
+    use tempfile::TempDir;
+
+    let repo = TempDir::new().expect("create tempdir");
+    let git_dir = repo.path().join(".git");
+    std::fs::create_dir(&git_dir).expect("create .git");
+
+    let test_file = git_dir.join("test.txt");
+    let test_file_str = test_file.to_string_lossy();
+
+    // This should panic because .git is read-only even when repo root is writable
+    let cwd = std::env::current_dir().expect("cwd");
+    let params = ExecParams {
+        command: vec![
+            "bash".to_string(),
+            "-c".to_string(),
+            format!("echo data > {}", test_file_str),
+        ],
+        cwd: cwd.clone(),
+        timeout_ms: Some(SHORT_TIMEOUT_MS),
+        env: create_env_from_core_vars(),
+        with_escalated_permissions: None,
+        justification: None,
+    };
+
+    let sandbox_policy = SandboxPolicy::WorkspaceWrite {
+        writable_roots: vec![repo.path().to_path_buf()],
+        network_access: false,
+        exclude_tmpdir_env_var: true,
+        exclude_slash_tmp: true,
+    };
+
+    let sandbox_program = env!("CARGO_BIN_EXE_codex-linux-sandbox");
+    let codex_linux_sandbox_exe = Some(PathBuf::from(sandbox_program));
+
+    let res = process_exec_tool_call(
+        params,
+        SandboxType::LinuxSeccomp,
+        &sandbox_policy,
+        cwd.as_path(),
+        &codex_linux_sandbox_exe,
+        None,
+    )
+    .await;
+
+    // Should fail because .git is read-only
+    assert!(res.is_err() || res.unwrap().exit_code != 0);
+}
+
+#[tokio::test]
+async fn test_codex_folder_is_read_only() {
+    use tempfile::TempDir;
+
+    let project = TempDir::new().expect("create tempdir");
+    let codex_dir = project.path().join(".codex");
+    std::fs::create_dir(&codex_dir).expect("create .codex");
+
+    // Create a config file in .codex
+    std::fs::write(codex_dir.join("config.toml"), "model = \"test\"")
+        .expect("write initial config");
+
+    let test_file = codex_dir.join("test.txt");
+    let test_file_str = test_file.to_string_lossy();
+
+    // This should fail because .codex is read-only even when project root is writable
+    let cwd = std::env::current_dir().expect("cwd");
+    let params = ExecParams {
+        command: vec![
+            "bash".to_string(),
+            "-c".to_string(),
+            format!("echo data > {}", test_file_str),
+        ],
+        cwd: cwd.clone(),
+        timeout_ms: Some(SHORT_TIMEOUT_MS),
+        env: create_env_from_core_vars(),
+        with_escalated_permissions: None,
+        justification: None,
+    };
+
+    let sandbox_policy = SandboxPolicy::WorkspaceWrite {
+        writable_roots: vec![project.path().to_path_buf()],
+        network_access: false,
+        exclude_tmpdir_env_var: true,
+        exclude_slash_tmp: true,
+    };
+
+    let sandbox_program = env!("CARGO_BIN_EXE_codex-linux-sandbox");
+    let codex_linux_sandbox_exe = Some(PathBuf::from(sandbox_program));
+
+    let res = process_exec_tool_call(
+        params,
+        SandboxType::LinuxSeccomp,
+        &sandbox_policy,
+        cwd.as_path(),
+        &codex_linux_sandbox_exe,
+        None,
+    )
+    .await;
+
+    // Should fail because .codex is read-only
+    assert!(res.is_err() || res.unwrap().exit_code != 0);
+
+    // But reading should work
+    let read_params = ExecParams {
+        command: vec![
+            "cat".to_string(),
+            codex_dir.join("config.toml").to_string_lossy().to_string(),
+        ],
+        cwd: cwd.clone(),
+        timeout_ms: Some(SHORT_TIMEOUT_MS),
+        env: create_env_from_core_vars(),
+        with_escalated_permissions: None,
+        justification: None,
+    };
+
+    let read_res = process_exec_tool_call(
+        read_params,
+        SandboxType::LinuxSeccomp,
+        &sandbox_policy,
+        cwd.as_path(),
+        &codex_linux_sandbox_exe,
+        None,
+    )
+    .await
+    .expect("read should succeed");
+
+    assert_eq!(read_res.exit_code, 0);
+    assert!(read_res.stdout.text.contains("model"));
+}
+
+#[tokio::test]
 async fn test_dev_null_write() {
     run_cmd(
         &["bash", "-lc", "echo blah > /dev/null"],

@@ -147,6 +147,7 @@ mod tests {
             root_without_git,
             root_with_git_canon,
             root_with_git_git_canon,
+            root_with_git_codex_canon,
             root_without_git_canon,
         } = populate_tmpdir(tmp.path());
         let cwd = tmp.path().join("cwd");
@@ -170,13 +171,13 @@ mod tests {
         // Note that the policy includes:
         // - the base policy,
         // - read-only access to the filesystem,
-        // - write access to WRITABLE_ROOT_0 (but not its .git) and WRITABLE_ROOT_1.
+        // - write access to WRITABLE_ROOT_0 (but not its .git and .codex) and WRITABLE_ROOT_1.
         let expected_policy = format!(
             r#"{MACOS_SEATBELT_BASE_POLICY}
 ; allow read-only file operations
 (allow file-read*)
 (allow file-write*
-(require-all (subpath (param "WRITABLE_ROOT_0")) (require-not (subpath (param "WRITABLE_ROOT_0_RO_0"))) ) (subpath (param "WRITABLE_ROOT_1")) (subpath (param "WRITABLE_ROOT_2"))
+(require-all (subpath (param "WRITABLE_ROOT_0")) (require-not (subpath (param "WRITABLE_ROOT_0_RO_0"))) (require-not (subpath (param "WRITABLE_ROOT_0_RO_1"))) ) (subpath (param "WRITABLE_ROOT_1")) (subpath (param "WRITABLE_ROOT_2"))
 )
 "#,
         );
@@ -191,6 +192,10 @@ mod tests {
             format!(
                 "-DWRITABLE_ROOT_0_RO_0={}",
                 root_with_git_git_canon.to_string_lossy()
+            ),
+            format!(
+                "-DWRITABLE_ROOT_0_RO_1={}",
+                root_with_git_codex_canon.to_string_lossy()
             ),
             format!(
                 "-DWRITABLE_ROOT_1={}",
@@ -222,11 +227,12 @@ mod tests {
             root_with_git,
             root_with_git_canon,
             root_with_git_git_canon,
+            root_with_git_codex_canon,
             ..
         } = populate_tmpdir(tmp.path());
 
         // Build a policy that does not specify any writable_roots, but does
-        // use the default ones (cwd and TMPDIR) and verifies the `.git` check
+        // use the default ones (cwd and TMPDIR) and verifies the `.git` and `.codex` check
         // is done properly for cwd.
         let policy = SandboxPolicy::WorkspaceWrite {
             writable_roots: vec![],
@@ -257,13 +263,13 @@ mod tests {
         // Note that the policy includes:
         // - the base policy,
         // - read-only access to the filesystem,
-        // - write access to WRITABLE_ROOT_0 (but not its .git) and WRITABLE_ROOT_1.
+        // - write access to WRITABLE_ROOT_0 (but not its .git and .codex) and WRITABLE_ROOT_1.
         let expected_policy = format!(
             r#"{MACOS_SEATBELT_BASE_POLICY}
 ; allow read-only file operations
 (allow file-read*)
 (allow file-write*
-(require-all (subpath (param "WRITABLE_ROOT_0")) (require-not (subpath (param "WRITABLE_ROOT_0_RO_0"))) ) (subpath (param "WRITABLE_ROOT_1")){tempdir_policy_entry}
+(require-all (subpath (param "WRITABLE_ROOT_0")) (require-not (subpath (param "WRITABLE_ROOT_0_RO_0"))) (require-not (subpath (param "WRITABLE_ROOT_0_RO_1"))) ) (subpath (param "WRITABLE_ROOT_1")){tempdir_policy_entry}
 )
 "#,
         );
@@ -278,6 +284,10 @@ mod tests {
             format!(
                 "-DWRITABLE_ROOT_0_RO_0={}",
                 root_with_git_git_canon.to_string_lossy()
+            ),
+            format!(
+                "-DWRITABLE_ROOT_0_RO_1={}",
+                root_with_git_codex_canon.to_string_lossy()
             ),
             format!(
                 "-DWRITABLE_ROOT_1={}",
@@ -306,6 +316,7 @@ mod tests {
         root_without_git: PathBuf,
         root_with_git_canon: PathBuf,
         root_with_git_git_canon: PathBuf,
+        root_with_git_codex_canon: PathBuf,
         root_without_git_canon: PathBuf,
     }
 
@@ -315,10 +326,12 @@ mod tests {
         fs::create_dir_all(&root_with_git).expect("create with_git");
         fs::create_dir_all(&root_without_git).expect("create no_git");
         fs::create_dir_all(root_with_git.join(".git")).expect("create .git");
+        fs::create_dir_all(root_with_git.join(".codex")).expect("create .codex");
 
         // Ensure we have canonical paths for -D parameter matching.
         let root_with_git_canon = root_with_git.canonicalize().expect("canonicalize with_git");
         let root_with_git_git_canon = root_with_git_canon.join(".git");
+        let root_with_git_codex_canon = root_with_git_canon.join(".codex");
         let root_without_git_canon = root_without_git
             .canonicalize()
             .expect("canonicalize no_git");
@@ -327,6 +340,7 @@ mod tests {
             root_without_git,
             root_with_git_canon,
             root_with_git_git_canon,
+            root_with_git_codex_canon,
             root_without_git_canon,
         }
     }

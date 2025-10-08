@@ -8,6 +8,7 @@ use codex_common::CliConfigOverrides;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
 use codex_core::config::find_codex_home;
+use codex_core::config::find_state_directory;
 use codex_core::config::load_global_mcp_servers;
 use codex_core::config::write_global_mcp_servers;
 use codex_core::config_types::McpServerConfig;
@@ -160,10 +161,11 @@ async fn run_add(config_overrides: &CliConfigOverrides, add_args: AddArgs) -> Re
         Some(map)
     };
 
-    let codex_home = find_codex_home().context("failed to resolve CODEX_HOME")?;
-    let mut servers = load_global_mcp_servers(&codex_home)
+    let state_dir = find_state_directory().context("failed to resolve state directory")?;
+
+    let mut servers = load_global_mcp_servers(&state_dir)
         .await
-        .with_context(|| format!("failed to load MCP servers from {}", codex_home.display()))?;
+        .with_context(|| format!("failed to load MCP servers from {}", state_dir.display()))?;
 
     let new_entry = McpServerConfig {
         transport: McpServerTransportConfig::Stdio {
@@ -177,8 +179,8 @@ async fn run_add(config_overrides: &CliConfigOverrides, add_args: AddArgs) -> Re
 
     servers.insert(name.clone(), new_entry);
 
-    write_global_mcp_servers(&codex_home, &servers)
-        .with_context(|| format!("failed to write MCP servers to {}", codex_home.display()))?;
+    write_global_mcp_servers(&state_dir, &servers)
+        .with_context(|| format!("failed to write MCP servers to {}", state_dir.display()))?;
 
     println!("Added global MCP server '{name}'.");
 
@@ -192,16 +194,17 @@ async fn run_remove(config_overrides: &CliConfigOverrides, remove_args: RemoveAr
 
     validate_server_name(&name)?;
 
-    let codex_home = find_codex_home().context("failed to resolve CODEX_HOME")?;
-    let mut servers = load_global_mcp_servers(&codex_home)
+    let state_dir = find_state_directory().context("failed to resolve state directory")?;
+
+    let mut servers = load_global_mcp_servers(&state_dir)
         .await
-        .with_context(|| format!("failed to load MCP servers from {}", codex_home.display()))?;
+        .with_context(|| format!("failed to load MCP servers from {}", state_dir.display()))?;
 
     let removed = servers.remove(&name).is_some();
 
     if removed {
-        write_global_mcp_servers(&codex_home, &servers)
-            .with_context(|| format!("failed to write MCP servers to {}", codex_home.display()))?;
+        write_global_mcp_servers(&state_dir, &servers)
+            .with_context(|| format!("failed to write MCP servers to {}", state_dir.display()))?;
     }
 
     if removed {
