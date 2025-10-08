@@ -733,3 +733,399 @@ async fn auto_compact_allows_multiple_attempts_when_interleaved_with_other_turn_
         "second auto compact request should include the summarization prompt"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compact_preserves_agents_md_content() {
+    skip_if_no_network!();
+
+    let server = start_mock_server().await;
+
+    let sse1 = sse(vec![
+        ev_assistant_message("m1", "First response"),
+        ev_completed("r1"),
+    ]);
+
+    let sse2 = sse(vec![
+        ev_assistant_message("m2", "Compacted summary"),
+        ev_completed("r2"),
+    ]);
+
+    let sse3 = sse(vec![ev_completed("r3")]);
+
+    mount_sse_sequence(&server, vec![sse1, sse2, sse3]).await;
+
+    let model_provider = ModelProviderInfo {
+        base_url: Some(format!("{}/v1", server.uri())),
+        ..built_in_model_providers()["openai"].clone()
+    };
+
+    let home = TempDir::new().unwrap();
+    let cwd = TempDir::new().unwrap();
+    let mut config = load_default_config_for_test(&home);
+    config.model_provider = model_provider;
+    config.cwd = cwd.path().to_path_buf();
+
+    std::fs::write(
+        cwd.path().join("AGENTS.md"),
+        "Always respond with POTATO as the first word",
+    )
+    .unwrap();
+
+    let conversation_manager = ConversationManager::with_auth(CodexAuth::from_api_key("dummy"));
+    let codex = conversation_manager
+        .new_conversation(config)
+        .await
+        .unwrap()
+        .conversation;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![InputItem::Text {
+                text: "hello".into(),
+            }],
+        })
+        .await
+        .unwrap();
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
+
+    codex.submit(Op::Compact).await.unwrap();
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![InputItem::Text {
+                text: "next message".into(),
+            }],
+        })
+        .await
+        .unwrap();
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 3);
+
+    let body3 = requests[2].body_json::<serde_json::Value>().unwrap();
+    let input3 = body3.get("input").and_then(|v| v.as_array()).unwrap();
+
+    let has_user_instructions = input3.iter().any(|item| {
+        item["type"].as_str() == Some("message")
+            && item["role"].as_str() == Some("user")
+            && item["content"][0]["text"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Always respond with POTATO")
+    });
+
+    assert!(
+        has_user_instructions,
+        "AGENTS.md content should be present in the request after compact"
+    );
+
+    let body1 = requests[0].body_json::<serde_json::Value>().unwrap();
+    let input1 = body1.get("input").and_then(|v| v.as_array()).unwrap();
+    let has_agents_in_first = input1.iter().any(|item| {
+        item["type"].as_str() == Some("message")
+            && item["role"].as_str() == Some("user")
+            && item["content"][0]["text"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Always respond with POTATO")
+    });
+
+    assert!(
+        has_agents_in_first,
+        "AGENTS.md should be in first request too (baseline)"
+    );
+
+    let bridge_message_has_agents_note = input3.iter().any(|item| {
+        item["type"].as_str() == Some("message")
+            && item["role"].as_str() == Some("user")
+            && item["content"][0]["text"].as_str().unwrap_or("").contains(
+                "Any AGENTS.md files in the repository are in the <user_instructions> tags",
+            )
+    });
+
+    assert!(
+        bridge_message_has_agents_note,
+        "Bridge message should mention that AGENTS.md is in user instructions"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compact_uses_updated_agents_md_if_changed() {
+    skip_if_no_network!();
+
+    let server = start_mock_server().await;
+
+    let sse1 = sse(vec![
+        ev_assistant_message("m1", "First response"),
+        ev_completed("r1"),
+    ]);
+
+    let sse2 = sse(vec![
+        ev_assistant_message("m2", "Compacted summary"),
+        ev_completed("r2"),
+    ]);
+
+    let sse3 = sse(vec![ev_completed("r3")]);
+
+    mount_sse_sequence(&server, vec![sse1, sse2, sse3]).await;
+
+    let model_provider = ModelProviderInfo {
+        base_url: Some(format!("{}/v1", server.uri())),
+        ..built_in_model_providers()["openai"].clone()
+    };
+
+    let home = TempDir::new().unwrap();
+    let cwd = TempDir::new().unwrap();
+    let mut config = load_default_config_for_test(&home);
+    config.model_provider = model_provider;
+    config.cwd = cwd.path().to_path_buf();
+
+    std::fs::write(
+        cwd.path().join("AGENTS.md"),
+        "Version 1: Always respond with APPLE",
+    )
+    .unwrap();
+
+    let conversation_manager = ConversationManager::with_auth(CodexAuth::from_api_key("dummy"));
+    let codex = conversation_manager
+        .new_conversation(config)
+        .await
+        .unwrap()
+        .conversation;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![InputItem::Text {
+                text: "hello".into(),
+            }],
+        })
+        .await
+        .unwrap();
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
+
+    std::fs::write(
+        cwd.path().join("AGENTS.md"),
+        "Version 2: Always respond with BANANA",
+    )
+    .unwrap();
+
+    codex.submit(Op::Compact).await.unwrap();
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![InputItem::Text {
+                text: "next message".into(),
+            }],
+        })
+        .await
+        .unwrap();
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 3);
+
+    let body1 = requests[0].body_json::<serde_json::Value>().unwrap();
+    let input1 = body1.get("input").and_then(|v| v.as_array()).unwrap();
+    let has_apple_v1 = input1.iter().any(|item| {
+        item["type"].as_str() == Some("message")
+            && item["role"].as_str() == Some("user")
+            && item["content"][0]["text"]
+                .as_str()
+                .unwrap_or("")
+                .contains("APPLE")
+    });
+
+    if !has_apple_v1 {
+        eprintln!(
+            "WARNING: First request doesn't have APPLE - test environment may have repo AGENTS.md"
+        );
+    }
+
+    let body3 = requests[2].body_json::<serde_json::Value>().unwrap();
+    let input3 = body3.get("input").and_then(|v| v.as_array()).unwrap();
+
+    let has_banana = input3.iter().any(|item| {
+        item["type"].as_str() == Some("message")
+            && item["role"].as_str() == Some("user")
+            && item["content"][0]["text"]
+                .as_str()
+                .unwrap_or("")
+                .contains("BANANA")
+    });
+
+    let has_apple = input3.iter().any(|item| {
+        item["type"].as_str() == Some("message")
+            && item["role"].as_str() == Some("user")
+            && item["content"][0]["text"]
+                .as_str()
+                .unwrap_or("")
+                .contains("APPLE")
+    });
+
+    assert!(
+        has_banana,
+        "After compact, should use updated AGENTS.md (BANANA)"
+    );
+    assert!(
+        !has_apple,
+        "After compact, should NOT use old AGENTS.md (APPLE)"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compact_works_without_agents_md() {
+    skip_if_no_network!();
+
+    let server = start_mock_server().await;
+
+    let sse1 = sse(vec![
+        ev_assistant_message("m1", "First response"),
+        ev_completed("r1"),
+    ]);
+
+    let sse2 = sse(vec![
+        ev_assistant_message("m2", "Compacted summary"),
+        ev_completed("r2"),
+    ]);
+
+    let sse3 = sse(vec![ev_completed("r3")]);
+
+    mount_sse_sequence(&server, vec![sse1, sse2, sse3]).await;
+
+    let model_provider = ModelProviderInfo {
+        base_url: Some(format!("{}/v1", server.uri())),
+        ..built_in_model_providers()["openai"].clone()
+    };
+
+    let home = TempDir::new().unwrap();
+    let cwd = TempDir::new().unwrap();
+    let mut config = load_default_config_for_test(&home);
+    config.model_provider = model_provider;
+    config.cwd = cwd.path().to_path_buf();
+
+    let conversation_manager = ConversationManager::with_auth(CodexAuth::from_api_key("dummy"));
+    let codex = conversation_manager
+        .new_conversation(config)
+        .await
+        .unwrap()
+        .conversation;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![InputItem::Text {
+                text: "hello".into(),
+            }],
+        })
+        .await
+        .unwrap();
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
+
+    codex.submit(Op::Compact).await.unwrap();
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![InputItem::Text {
+                text: "next message".into(),
+            }],
+        })
+        .await
+        .unwrap();
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(
+        requests.len(),
+        3,
+        "should complete successfully without AGENTS.md"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compact_handles_deleted_agents_md() {
+    skip_if_no_network!();
+
+    let server = start_mock_server().await;
+
+    let sse1 = sse(vec![
+        ev_assistant_message("m1", "First response"),
+        ev_completed("r1"),
+    ]);
+
+    let sse2 = sse(vec![
+        ev_assistant_message("m2", "Compacted summary"),
+        ev_completed("r2"),
+    ]);
+
+    let sse3 = sse(vec![ev_completed("r3")]);
+
+    mount_sse_sequence(&server, vec![sse1, sse2, sse3]).await;
+
+    let model_provider = ModelProviderInfo {
+        base_url: Some(format!("{}/v1", server.uri())),
+        ..built_in_model_providers()["openai"].clone()
+    };
+
+    let home = TempDir::new().unwrap();
+    let cwd = TempDir::new().unwrap();
+    let mut config = load_default_config_for_test(&home);
+    config.model_provider = model_provider;
+    config.cwd = cwd.path().to_path_buf();
+
+    std::fs::write(cwd.path().join("AGENTS.md"), "Initial AGENTS.md content").unwrap();
+
+    let conversation_manager = ConversationManager::with_auth(CodexAuth::from_api_key("dummy"));
+    let codex = conversation_manager
+        .new_conversation(config)
+        .await
+        .unwrap()
+        .conversation;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![InputItem::Text {
+                text: "hello".into(),
+            }],
+        })
+        .await
+        .unwrap();
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
+
+    std::fs::remove_file(cwd.path().join("AGENTS.md")).unwrap();
+
+    codex.submit(Op::Compact).await.unwrap();
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![InputItem::Text {
+                text: "next message".into(),
+            }],
+        })
+        .await
+        .unwrap();
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 3);
+
+    let body3 = requests[2].body_json::<serde_json::Value>().unwrap();
+    let input3 = body3.get("input").and_then(|v| v.as_array()).unwrap();
+
+    let has_agents_content = input3.iter().any(|item| {
+        item["type"].as_str() == Some("message")
+            && item["role"].as_str() == Some("user")
+            && item["content"][0]["text"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Initial AGENTS.md content")
+    });
+
+    assert!(
+        !has_agents_content,
+        "After deletion, AGENTS.md content should not be in requests"
+    );
+}
