@@ -515,6 +515,7 @@ pub async fn find_conversation_path_by_id_str(
         threads,
         cancel,
         compute_indices,
+        file_search::FileTypeFilter::FilesOnly,
     )
     .map_err(|e| io::Error::other(format!("file search failed: {e}")))?;
 

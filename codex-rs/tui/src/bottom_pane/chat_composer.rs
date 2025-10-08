@@ -110,6 +110,8 @@ pub(crate) struct ChatComposer {
     footer_mode: FooterMode,
     footer_hint_override: Option<Vec<(String, String)>>,
     context_window_percent: Option<u8>,
+    workspaces: Vec<PathBuf>,
+    cwd: PathBuf,
 }
 
 /// Popup state – at most one can be visible at any time.
@@ -153,6 +155,8 @@ impl ChatComposer {
             footer_mode: FooterMode::ShortcutPrompt,
             footer_hint_override: None,
             context_window_percent: None,
+            workspaces: Vec::new(),
+            cwd: PathBuf::from("."),
         };
         // Apply configuration via the setter to keep side-effects centralized.
         this.set_disable_paste_burst(disable_paste_burst);
@@ -348,9 +352,16 @@ impl ChatComposer {
 
     /// Integrate results from an asynchronous file search.
     pub(crate) fn on_file_search_result(&mut self, query: String, matches: Vec<FileMatch>) {
-        // Only apply if user is still editing a token starting with `query`.
-        let current_opt = Self::current_at_token(&self.textarea);
-        let Some(current_token) = current_opt else {
+        // Check if user is still in a context that expects file search results.
+        // This includes @token or /add-workspace path contexts.
+        let in_add_workspace = Self::current_add_workspace_path(&self.textarea).is_some();
+        let current_token = if in_add_workspace {
+            Self::current_add_workspace_path(&self.textarea)
+        } else {
+            Self::current_at_token(&self.textarea)
+        };
+
+        let Some(current_token) = current_token else {
             return;
         };
 
@@ -611,34 +622,92 @@ impl ChatComposer {
             }
             KeyEvent {
                 code: KeyCode::Tab, ..
-            }
-            | KeyEvent {
-                code: KeyCode::Enter,
-                modifiers: KeyModifiers::NONE,
-                ..
             } => {
                 let Some(sel) = popup.selected_match() else {
                     self.active_popup = ActivePopup::None;
                     return (InputResult::None, true);
                 };
+                let mut sel_path = sel.to_string();
+                if !sel_path.ends_with('/') && !sel_path.ends_with(std::path::MAIN_SEPARATOR) {
+                    sel_path.push(std::path::MAIN_SEPARATOR);
+                }
+
+                let cursor_offset = self.textarea.cursor();
+                let text = self.textarea.text();
+                let safe_cursor = Self::clamp_to_char_boundary(text, cursor_offset);
+                let before_cursor = &text[..safe_cursor];
+                let after_cursor = &text[safe_cursor..];
+
+                let start_idx = before_cursor
+                    .char_indices()
+                    .rfind(|(_, c)| c.is_whitespace())
+                    .map(|(idx, c)| idx + c.len_utf8())
+                    .unwrap_or(0);
+                let end_rel_idx = after_cursor
+                    .char_indices()
+                    .find(|(_, c)| c.is_whitespace())
+                    .map(|(idx, _)| idx)
+                    .unwrap_or(after_cursor.len());
+                let end_idx = safe_cursor + end_rel_idx;
+
+                let mut new_text =
+                    String::with_capacity(text.len() - (end_idx - start_idx) + sel_path.len());
+                new_text.push_str(&text[..start_idx]);
+                new_text.push_str(&sel_path);
+                new_text.push_str(&text[end_idx..]);
+
+                self.textarea.set_text(&new_text);
+                self.textarea.set_cursor(start_idx + sel_path.len());
+                (InputResult::None, true)
+            }
+            KeyEvent {
+                code: KeyCode::Enter,
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => {
+                let Some(sel) = popup.selected_match() else {
+                    if let Some(path_query) = Self::current_add_workspace_path(&self.textarea) {
+                        let path_to_check = if path_query.starts_with('/') {
+                            PathBuf::from(&path_query)
+                        } else if path_query.starts_with("~/") {
+                            if let Some(home) = std::env::var_os("HOME") {
+                                let mut p = PathBuf::from(home);
+                                p.push(&path_query[2..]);
+                                p
+                            } else {
+                                self.active_popup = ActivePopup::None;
+                                return (InputResult::None, true);
+                            }
+                        } else {
+                            let mut p = self.cwd.clone();
+                            p.push(&path_query);
+                            p
+                        };
+
+                        if path_to_check.is_dir() {
+                            let first_line = self.textarea.text().lines().next().unwrap_or("");
+                            if let Some((cmd_name, _)) = parse_slash_name(first_line) {
+                                if let Some(cmd) = SlashCommand::try_from(cmd_name).ok() {
+                                    return (InputResult::Command(cmd), true);
+                                }
+                            }
+                        }
+                    }
+                    self.active_popup = ActivePopup::None;
+                    return (InputResult::None, true);
+                };
 
                 let sel_path = sel.to_string();
-                // If selected path looks like an image (png/jpeg), attach as image instead of inserting text.
                 let is_image = Self::is_image_path(&sel_path);
                 if is_image {
-                    // Determine dimensions; if that fails fall back to normal path insertion.
                     let path_buf = PathBuf::from(&sel_path);
                     if let Ok((w, h)) = image::image_dimensions(&path_buf) {
-                        // Remove the current @token (mirror logic from insert_selected_path without inserting text)
-                        // using the flat text and byte-offset cursor API.
                         let cursor_offset = self.textarea.cursor();
                         let text = self.textarea.text();
-                        // Clamp to a valid char boundary to avoid panics when slicing.
                         let safe_cursor = Self::clamp_to_char_boundary(text, cursor_offset);
                         let before_cursor = &text[..safe_cursor];
                         let after_cursor = &text[safe_cursor..];
 
-                        // Determine token boundaries in the full text.
                         let start_idx = before_cursor
                             .char_indices()
                             .rfind(|(_, c)| c.is_whitespace())
@@ -664,17 +733,25 @@ impl ChatComposer {
                             _ => "IMG",
                         };
                         self.attach_image(path_buf, w, h, format_label);
-                        // Add a trailing space to keep typing fluid.
                         self.textarea.insert_str(" ");
                     } else {
-                        // Fallback to plain path insertion if metadata read fails.
                         self.insert_selected_path(&sel_path);
                     }
                 } else {
-                    // Non-image: inserting file path.
+                    let text = self.textarea.text();
+                    if text.starts_with("/add-workspace ") || text.starts_with("/remove-workspace ")
+                    {
+                        self.active_popup = ActivePopup::None;
+                        if let Some(cmd) = text.strip_prefix('/').and_then(|rest| {
+                            let cmd_name = rest.split_whitespace().next()?;
+                            SlashCommand::try_from(cmd_name).ok()
+                        }) {
+                            return (InputResult::Command(cmd), true);
+                        }
+                    }
+
                     self.insert_selected_path(&sel_path);
                 }
-                // No selection: treat Enter as closing the popup/session.
                 self.active_popup = ActivePopup::None;
                 (InputResult::None, true)
             }
@@ -787,6 +864,156 @@ impl ChatComposer {
             return right_at.or(left_at);
         }
         left_at.or(right_at)
+    }
+
+    /// Extract the path argument from `/add-workspace <path>` if the cursor is
+    /// on the first line and positioned after the command name.
+    ///
+    /// Returns None if:
+    /// - The first line doesn't start with `/add-workspace `
+    /// - The cursor is not on the first line
+    /// - The cursor is still on the command name itself
+    fn current_add_workspace_path(textarea: &TextArea) -> Option<String> {
+        let text = textarea.text();
+        let cursor = textarea.cursor();
+        let first_line_end = text.find('\n').unwrap_or(text.len());
+        let first_line = &text[..first_line_end];
+
+        if cursor > first_line_end {
+            return None;
+        }
+
+        let stripped = first_line.strip_prefix("/add-workspace ")?;
+        let cmd_prefix_len = "/add-workspace ".len();
+        (cursor >= cmd_prefix_len).then(|| stripped.to_string())
+    }
+
+    fn is_path_prefix(query: &str) -> bool {
+        !query.is_empty()
+            && (query == ".."
+                || query == "."
+                || query == "/"
+                || query == "~"
+                || query.ends_with('/')
+                || query.ends_with(std::path::MAIN_SEPARATOR))
+    }
+
+    fn show_directory_listing_for_path(&mut self, path_prefix: &str) {
+        use codex_file_search::FileMatch;
+        use std::fs;
+
+        let raw_path = if path_prefix.starts_with('/') {
+            PathBuf::from(path_prefix)
+        } else if path_prefix.starts_with("~/") {
+            if let Some(home) = std::env::var_os("HOME") {
+                let mut p = PathBuf::from(home);
+                p.push(&path_prefix[2..]);
+                p
+            } else {
+                return;
+            }
+        } else {
+            let mut p = self.cwd.clone();
+            p.push(path_prefix);
+            p
+        };
+
+        let base_path = match raw_path.canonicalize() {
+            Ok(canonical) => canonical,
+            Err(_) => {
+                match &mut self.active_popup {
+                    ActivePopup::File(popup) => {
+                        popup.set_query(path_prefix);
+                        popup.set_matches(path_prefix, Vec::new());
+                    }
+                    _ => {
+                        let mut popup = FileSearchPopup::new();
+                        popup.set_query(path_prefix);
+                        popup.set_matches(path_prefix, Vec::new());
+                        self.active_popup = ActivePopup::File(popup);
+                    }
+                }
+                return;
+            }
+        };
+
+        let mut matches: Vec<FileMatch> = if let Ok(entries) = fs::read_dir(&base_path) {
+            entries
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
+                .filter_map(|entry| {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name == "." || name == ".." {
+                        return None;
+                    }
+                    Some(FileMatch {
+                        score: 100,
+                        path: format!("{}{}/", path_prefix, name),
+                        indices: None,
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        if matches.is_empty() && path_prefix.ends_with('/') {
+            matches.push(FileMatch {
+                score: 100,
+                path: path_prefix.to_string(),
+                indices: None,
+            });
+        }
+
+        matches.sort_by(|a, b| a.path.cmp(&b.path));
+
+        match &mut self.active_popup {
+            ActivePopup::File(popup) => {
+                popup.set_query(path_prefix);
+                popup.set_matches(path_prefix, matches);
+            }
+            _ => {
+                let mut popup = FileSearchPopup::new();
+                popup.set_query(path_prefix);
+                popup.set_matches(path_prefix, matches);
+                self.active_popup = ActivePopup::File(popup);
+            }
+        }
+    }
+
+    /// Extract the path argument from `/remove-workspace <path>` if the cursor is
+    /// on the first line and positioned after the command name.
+    ///
+    /// Returns None if:
+    /// - The first line doesn't start with `/remove-workspace`
+    /// - The cursor is not on the first line
+    /// - The cursor is still on the command name itself
+    fn current_remove_workspace_path(textarea: &TextArea) -> Option<String> {
+        let text = textarea.text();
+        let cursor = textarea.cursor();
+
+        // Extract first line.
+        let first_line_end = text.find('\n').unwrap_or(text.len());
+        let first_line = &text[..first_line_end];
+
+        // Check cursor is on first line.
+        if cursor > first_line_end {
+            return None;
+        }
+
+        // Check if line starts with `/remove-workspace` (with or without space).
+        if let Some(stripped) = first_line.strip_prefix("/remove-workspace ") {
+            // User is typing the path argument.
+            let cmd_prefix_len = "/remove-workspace ".len();
+            if cursor >= cmd_prefix_len {
+                return Some(stripped.to_string());
+            }
+        } else if first_line == "/remove-workspace" && cursor >= "/remove-workspace".len() {
+            // User has typed the command but no space yet - show all workspaces.
+            return Some(String::new());
+        }
+
+        None
     }
 
     /// Replace the active `@token` (the one under the cursor) with `path`.
@@ -904,13 +1131,19 @@ impl ChatComposer {
                 // literal text.
                 let first_line = self.textarea.text().lines().next().unwrap_or("");
                 if let Some((name, rest)) = parse_slash_name(first_line)
-                    && rest.is_empty()
                     && let Some((_n, cmd)) = built_in_slash_commands()
                         .into_iter()
                         .find(|(n, _)| *n == name)
                 {
-                    self.textarea.set_text("");
-                    return (InputResult::Command(cmd), true);
+                    // Only dispatch if it's a command without args, or if args are expected
+                    let should_dispatch = rest.is_empty() || cmd.parameter_hint().is_some();
+                    if should_dispatch {
+                        // Don't clear text for commands that need to read their arguments
+                        if cmd.parameter_hint().is_none() {
+                            self.textarea.set_text("");
+                        }
+                        return (InputResult::Command(cmd), true);
+                    }
                 }
                 // If we're in a paste-like burst capture, treat Enter as part of the burst
                 // and accumulate it rather than submitting or inserting immediately.
@@ -1414,11 +1647,28 @@ impl ChatComposer {
         }
     }
 
+    pub(crate) fn set_workspaces(&mut self, workspaces: Vec<PathBuf>, cwd: PathBuf) {
+        self.workspaces = workspaces;
+        self.cwd = cwd;
+    }
+
     /// Synchronize `self.file_search_popup` with the current text in the textarea.
     /// Note this is only called when self.active_popup is NOT Command.
     fn sync_file_search_popup(&mut self) {
-        // Determine if there is an @token underneath the cursor.
-        let query = match Self::current_at_token(&self.textarea) {
+        // Check if we're in /remove-workspace context first
+        if let Some(remove_query) = Self::current_remove_workspace_path(&self.textarea) {
+            self.sync_remove_workspace_popup(remove_query);
+            return;
+        }
+
+        let in_add_workspace = Self::current_add_workspace_path(&self.textarea).is_some();
+        let query = if in_add_workspace {
+            Self::current_add_workspace_path(&self.textarea)
+        } else {
+            Self::current_at_token(&self.textarea)
+        };
+
+        let query = match query {
             Some(token) => token,
             None => {
                 self.active_popup = ActivePopup::None;
@@ -1427,14 +1677,28 @@ impl ChatComposer {
             }
         };
 
-        // If user dismissed popup for this exact query, don't reopen until text changes.
         if self.dismissed_file_popup_token.as_ref() == Some(&query) {
             return;
         }
 
         if !query.is_empty() {
-            self.app_event_tx
-                .send(AppEvent::StartFileSearch(query.clone()));
+            if in_add_workspace && Self::is_path_prefix(&query) {
+                self.show_directory_listing_for_path(&query);
+                self.current_file_query = Some(query);
+                self.dismissed_file_popup_token = None;
+                return;
+            }
+
+            let file_type_filter = if in_add_workspace {
+                codex_file_search::FileTypeFilter::DirsOnly
+            } else {
+                codex_file_search::FileTypeFilter::FilesOnly
+            };
+
+            self.app_event_tx.send(AppEvent::StartFileSearch {
+                query: query.clone(),
+                file_type_filter,
+            });
         }
 
         match &mut self.active_popup {
@@ -1452,6 +1716,52 @@ impl ChatComposer {
                 } else {
                     popup.set_query(&query);
                 }
+                self.active_popup = ActivePopup::File(popup);
+            }
+        }
+
+        self.current_file_query = Some(query);
+        self.dismissed_file_popup_token = None;
+    }
+
+    fn sync_remove_workspace_popup(&mut self, query: String) {
+        use codex_file_search::FileMatch;
+
+        if self.dismissed_file_popup_token.as_ref() == Some(&query) {
+            return;
+        }
+
+        let matches: Vec<FileMatch> = self
+            .workspaces
+            .iter()
+            .filter_map(|ws| {
+                let display_path = match ws.strip_prefix(&self.cwd) {
+                    Ok(rel) if !rel.as_os_str().is_empty() => {
+                        format!("./{}", rel.display())
+                    }
+                    _ => ws.display().to_string(),
+                };
+
+                if !query.is_empty() && !display_path.contains(&query) {
+                    return None;
+                }
+
+                Some(FileMatch {
+                    score: 100,
+                    path: display_path,
+                    indices: None,
+                })
+            })
+            .collect();
+
+        match &mut self.active_popup {
+            ActivePopup::File(popup) => {
+                popup.set_matches(&query, matches);
+            }
+            _ => {
+                let mut popup = FileSearchPopup::new();
+                popup.set_query(&query);
+                popup.set_matches(&query, matches);
                 self.active_popup = ActivePopup::File(popup);
             }
         }
@@ -3230,5 +3540,411 @@ mod tests {
 
         assert_eq!(composer.textarea.text(), "z".repeat(count));
         assert!(composer.pending_pastes.is_empty());
+    }
+
+    #[test]
+    fn current_add_workspace_path_detects_command() {
+        let mut textarea = TextArea::new();
+        textarea.set_text("/add-workspace src");
+        textarea.set_cursor("/add-workspace src".len());
+
+        let path = ChatComposer::current_add_workspace_path(&textarea);
+        assert_eq!(path, Some("src".to_string()));
+    }
+
+    #[test]
+    fn current_add_workspace_path_requires_space_after_command() {
+        let mut textarea = TextArea::new();
+        textarea.set_text("/add-workspace");
+        textarea.set_cursor("/add-workspace".len());
+
+        let path = ChatComposer::current_add_workspace_path(&textarea);
+        assert_eq!(path, None);
+    }
+
+    #[test]
+    fn current_add_workspace_path_cursor_on_command_name() {
+        let mut textarea = TextArea::new();
+        textarea.set_text("/add-workspace src");
+        textarea.set_cursor(5); // Cursor in the middle of "add-workspace"
+
+        let path = ChatComposer::current_add_workspace_path(&textarea);
+        assert_eq!(path, None);
+    }
+
+    #[test]
+    fn current_add_workspace_path_partial_path() {
+        let mut textarea = TextArea::new();
+        textarea.set_text("/add-workspace s");
+        textarea.set_cursor("/add-workspace s".len());
+
+        let path = ChatComposer::current_add_workspace_path(&textarea);
+        assert_eq!(path, Some("s".to_string()));
+    }
+
+    #[test]
+    fn current_remove_workspace_path_detects_command_with_path() {
+        let mut textarea = TextArea::new();
+        textarea.set_text("/remove-workspace ./src");
+        textarea.set_cursor("/remove-workspace ./src".len());
+
+        let path = ChatComposer::current_remove_workspace_path(&textarea);
+        assert_eq!(path, Some("./src".to_string()));
+    }
+
+    #[test]
+    fn current_remove_workspace_path_no_space_returns_empty() {
+        let mut textarea = TextArea::new();
+        textarea.set_text("/remove-workspace");
+        textarea.set_cursor("/remove-workspace".len());
+
+        let path = ChatComposer::current_remove_workspace_path(&textarea);
+        assert_eq!(path, Some(String::new()));
+    }
+
+    #[test]
+    fn current_remove_workspace_path_with_empty_path() {
+        let mut textarea = TextArea::new();
+        textarea.set_text("/remove-workspace ");
+        textarea.set_cursor("/remove-workspace ".len());
+
+        let path = ChatComposer::current_remove_workspace_path(&textarea);
+        assert_eq!(path, Some(String::new()));
+    }
+
+    #[test]
+    fn current_remove_workspace_path_cursor_on_command_name() {
+        let mut textarea = TextArea::new();
+        textarea.set_text("/remove-workspace src");
+        textarea.set_cursor(5); // Cursor in the middle of "remove-workspace"
+
+        let path = ChatComposer::current_remove_workspace_path(&textarea);
+        assert_eq!(path, None);
+    }
+
+    #[test]
+    fn current_remove_workspace_path_wrong_command() {
+        let mut textarea = TextArea::new();
+        textarea.set_text("/add-workspace src");
+        textarea.set_cursor("/add-workspace src".len());
+
+        let path = ChatComposer::current_remove_workspace_path(&textarea);
+        assert_eq!(path, None);
+    }
+
+    #[test]
+    fn add_workspace_with_relative_parent_path() {
+        let mut textarea = TextArea::new();
+        textarea.set_text("/add-workspace ../");
+        textarea.set_cursor("/add-workspace ../".len());
+
+        let path = ChatComposer::current_add_workspace_path(&textarea);
+        assert_eq!(path, Some("../".to_string()));
+    }
+
+    #[test]
+    fn add_workspace_with_relative_current_path() {
+        let mut textarea = TextArea::new();
+        textarea.set_text("/add-workspace ./");
+        textarea.set_cursor("/add-workspace ./".len());
+
+        let path = ChatComposer::current_add_workspace_path(&textarea);
+        assert_eq!(path, Some("./".to_string()));
+    }
+
+    #[test]
+    fn add_workspace_with_absolute_path() {
+        let mut textarea = TextArea::new();
+        textarea.set_text("/add-workspace /usr/local");
+        textarea.set_cursor("/add-workspace /usr/local".len());
+
+        let path = ChatComposer::current_add_workspace_path(&textarea);
+        assert_eq!(path, Some("/usr/local".to_string()));
+    }
+
+    #[test]
+    fn add_workspace_with_home_tilde() {
+        let mut textarea = TextArea::new();
+        textarea.set_text("/add-workspace ~/Documents");
+        textarea.set_cursor("/add-workspace ~/Documents".len());
+
+        let path = ChatComposer::current_add_workspace_path(&textarea);
+        assert_eq!(path, Some("~/Documents".to_string()));
+    }
+
+    #[test]
+    fn add_workspace_with_parent_and_subdirs() {
+        let mut textarea = TextArea::new();
+        textarea.set_text("/add-workspace ../../foo/bar");
+        textarea.set_cursor("/add-workspace ../../foo/bar".len());
+
+        let path = ChatComposer::current_add_workspace_path(&textarea);
+        assert_eq!(path, Some("../../foo/bar".to_string()));
+    }
+
+    #[test]
+    fn add_workspace_typing_absolute_root() {
+        let mut textarea = TextArea::new();
+        textarea.set_text("/add-workspace /");
+        textarea.set_cursor("/add-workspace /".len());
+
+        let path = ChatComposer::current_add_workspace_path(&textarea);
+        assert_eq!(path, Some("/".to_string()));
+    }
+
+    #[test]
+    fn remove_workspace_with_parent_path() {
+        let mut textarea = TextArea::new();
+        textarea.set_text("/remove-workspace ../other");
+        textarea.set_cursor("/remove-workspace ../other".len());
+
+        let path = ChatComposer::current_remove_workspace_path(&textarea);
+        assert_eq!(path, Some("../other".to_string()));
+    }
+
+    #[test]
+    fn remove_workspace_with_absolute_path() {
+        let mut textarea = TextArea::new();
+        textarea.set_text("/remove-workspace /home/user/project");
+        textarea.set_cursor("/remove-workspace /home/user/project".len());
+
+        let path = ChatComposer::current_remove_workspace_path(&textarea);
+        assert_eq!(path, Some("/home/user/project".to_string()));
+    }
+
+    #[test]
+    fn is_path_prefix_recognizes_trailing_slash() {
+        assert!(ChatComposer::is_path_prefix("../"));
+        assert!(ChatComposer::is_path_prefix("../../"));
+        assert!(ChatComposer::is_path_prefix("./"));
+        assert!(ChatComposer::is_path_prefix("/"));
+        assert!(ChatComposer::is_path_prefix("~/"));
+        assert!(ChatComposer::is_path_prefix("codex-rs/"));
+        assert!(ChatComposer::is_path_prefix("foo/bar/"));
+    }
+
+    #[test]
+    fn is_path_prefix_recognizes_special_dirs() {
+        assert!(ChatComposer::is_path_prefix(".."));
+        assert!(ChatComposer::is_path_prefix("."));
+        assert!(ChatComposer::is_path_prefix("~"));
+    }
+
+    #[test]
+    fn is_path_prefix_rejects_patterns() {
+        assert!(!ChatComposer::is_path_prefix("../cod"));
+        assert!(!ChatComposer::is_path_prefix("src"));
+        assert!(!ChatComposer::is_path_prefix("foo/bar"));
+        assert!(!ChatComposer::is_path_prefix("codex-rs"));
+        assert!(!ChatComposer::is_path_prefix(""));
+    }
+
+    #[test]
+    fn enter_with_no_match_but_valid_dir_dispatches_command() {
+        use crossterm::event::KeyCode;
+        use crossterm::event::KeyEvent;
+        use crossterm::event::KeyEventKind;
+        use crossterm::event::KeyEventState;
+        use crossterm::event::KeyModifiers;
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let test_dir = dir.path().join("test_workspace");
+        fs::create_dir(&test_dir).unwrap();
+
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(true, sender, true, "test".to_string(), false);
+        composer.cwd = dir.path().to_path_buf();
+
+        let mut textarea = TextArea::new();
+        let cmd_text = format!(
+            "/add-workspace {}/",
+            test_dir.file_name().unwrap().to_str().unwrap()
+        );
+        textarea.set_text(&cmd_text);
+        textarea.set_cursor(cmd_text.len());
+        composer.textarea = textarea;
+
+        let key = KeyEvent {
+            code: KeyCode::Enter,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+
+        composer.active_popup = ActivePopup::File(FileSearchPopup::new());
+
+        let (result, _) = composer.handle_key_event_with_file_popup(key);
+
+        match result {
+            InputResult::Command(cmd) => {
+                assert_eq!(cmd, SlashCommand::AddWorkspace);
+                assert_eq!(composer.textarea.text(), cmd_text);
+            }
+            _ => panic!("Expected Command result, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn enter_with_selected_match_dispatches_without_inserting() {
+        use codex_file_search::FileMatch;
+        use crossterm::event::KeyCode;
+        use crossterm::event::KeyEvent;
+        use crossterm::event::KeyEventKind;
+        use crossterm::event::KeyEventState;
+        use crossterm::event::KeyModifiers;
+
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(true, sender, true, "test".to_string(), false);
+
+        let mut textarea = TextArea::new();
+        textarea.set_text("/add-workspace ../../Housing");
+        textarea.set_cursor("/add-workspace ../../Housing".len());
+        composer.textarea = textarea;
+
+        let mut popup = FileSearchPopup::new();
+        popup.set_query("../../Housing");
+        popup.set_matches(
+            "../../Housing",
+            vec![FileMatch {
+                score: 100,
+                path: "../../Housing/CalFHA/".to_string(),
+                indices: None,
+            }],
+        );
+        composer.active_popup = ActivePopup::File(popup);
+
+        let key = KeyEvent {
+            code: KeyCode::Enter,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+
+        let (result, _) = composer.handle_key_event_with_file_popup(key);
+
+        match result {
+            InputResult::Command(cmd) => {
+                assert_eq!(cmd, SlashCommand::AddWorkspace);
+                assert_eq!(
+                    composer.textarea.text(),
+                    "/add-workspace ../../Housing",
+                    "Textarea should preserve user's typed path, not insert autocomplete match"
+                );
+            }
+            _ => panic!("Expected Command result, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn empty_directory_shows_path_as_match() {
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let empty_dir = dir.path().join("empty");
+        fs::create_dir(&empty_dir).unwrap();
+
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(true, sender, true, "test".to_string(), false);
+        composer.cwd = dir.path().to_path_buf();
+
+        composer.show_directory_listing_for_path("empty/");
+
+        if let ActivePopup::File(popup) = &composer.active_popup {
+            assert_eq!(popup.selected_match(), Some("empty/"));
+        } else {
+            panic!("Expected File popup");
+        }
+    }
+
+    #[test]
+    fn tab_inserts_path_with_trailing_slash_no_space() {
+        use codex_file_search::FileMatch;
+        use crossterm::event::KeyCode;
+        use crossterm::event::KeyEvent;
+        use crossterm::event::KeyEventKind;
+        use crossterm::event::KeyEventState;
+        use crossterm::event::KeyModifiers;
+
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(true, sender, true, "test".to_string(), false);
+
+        let mut textarea = TextArea::new();
+        textarea.set_text("/add-workspace codex-rs");
+        textarea.set_cursor("/add-workspace codex-rs".len());
+        composer.textarea = textarea;
+
+        let mut popup = FileSearchPopup::new();
+        popup.set_query("codex-rs");
+        popup.set_matches(
+            "codex-rs",
+            vec![FileMatch {
+                score: 100,
+                path: "codex-rs/".to_string(),
+                indices: None,
+            }],
+        );
+        composer.active_popup = ActivePopup::File(popup);
+
+        let key = KeyEvent {
+            code: KeyCode::Tab,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+
+        let (result, _) = composer.handle_key_event_with_file_popup(key);
+
+        assert!(matches!(result, InputResult::None));
+        let text = composer.textarea.text();
+        assert!(text.starts_with("/add-workspace codex-rs/"));
+        assert!(!text.contains("codex-rs/ "));
+    }
+
+    #[test]
+    fn workspace_command_not_cleared_before_dispatch() {
+        use crossterm::event::KeyCode;
+        use crossterm::event::KeyEvent;
+        use crossterm::event::KeyEventKind;
+        use crossterm::event::KeyEventState;
+        use crossterm::event::KeyModifiers;
+
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(true, sender, true, "test".to_string(), false);
+
+        let cmd_text = "/add-workspace ./test";
+        let mut textarea = TextArea::new();
+        textarea.set_text(cmd_text);
+        textarea.set_cursor(cmd_text.len());
+        composer.textarea = textarea;
+
+        composer.active_popup = ActivePopup::Command(CommandPopup::new(Vec::new()));
+
+        let key = KeyEvent {
+            code: KeyCode::Enter,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+
+        let (result, _) = composer.handle_key_event(key);
+
+        if let InputResult::Command(cmd) = result {
+            assert_eq!(cmd, SlashCommand::AddWorkspace);
+            assert_eq!(
+                composer.textarea.text(),
+                cmd_text,
+                "Textarea should not be cleared before dispatch"
+            );
+        } else {
+            panic!("Expected Command result");
+        }
     }
 }

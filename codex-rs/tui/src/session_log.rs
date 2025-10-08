@@ -145,12 +145,16 @@ pub(crate) fn log_inbound_app_event(event: &AppEvent) {
             });
             LOGGER.write_json_line(value);
         }
-        AppEvent::StartFileSearch(query) => {
+        AppEvent::StartFileSearch {
+            query,
+            file_type_filter,
+        } => {
             let value = json!({
                 "ts": now_ts(),
                 "dir": "to_tui",
                 "kind": "file_search_start",
                 "query": query,
+                "file_type_filter": format!("{:?}", file_type_filter),
             });
             LOGGER.write_json_line(value);
         }

@@ -22,6 +22,17 @@ mod cli;
 
 pub use cli::Cli;
 
+/// Filter for file type when searching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileTypeFilter {
+    /// Only include regular files (default behavior).
+    FilesOnly,
+    /// Only include directories.
+    DirsOnly,
+    /// Include both files and directories.
+    Both,
+}
+
 /// A single match result returned from the search.
 ///
 /// * `score` – Relevance score returned by `nucleo_matcher`.
@@ -105,6 +116,7 @@ pub async fn run_main<T: Reporter>(
         threads,
         cancel_flag,
         compute_indices,
+        FileTypeFilter::FilesOnly, // Default to files only for CLI
     )?;
     let match_count = matches.len();
     let matches_truncated = total_match_count > match_count;
@@ -129,6 +141,7 @@ pub fn run(
     threads: NonZero<usize>,
     cancel_flag: Arc<AtomicBool>,
     compute_indices: bool,
+    file_type_filter: FileTypeFilter,
 ) -> anyhow::Result<FileSearchResults> {
     let pattern = create_pattern(pattern_text);
     // Create one BestMatchesList per worker thread so that each worker can
@@ -186,7 +199,7 @@ pub fn run(
         let cancel = cancel_flag.clone();
 
         Box::new(move |entry| {
-            if let Some(path) = get_file_path(&entry, search_directory) {
+            if let Some(path) = get_file_path(&entry, search_directory, file_type_filter) {
                 best_list.insert(path);
             }
 
@@ -202,14 +215,28 @@ pub fn run(
     fn get_file_path<'a>(
         entry_result: &'a Result<ignore::DirEntry, ignore::Error>,
         search_directory: &std::path::Path,
+        file_type_filter: FileTypeFilter,
     ) -> Option<&'a str> {
         let entry = match entry_result {
             Ok(e) => e,
             Err(_) => return None,
         };
-        if entry.file_type().is_some_and(|ft| ft.is_dir()) {
+
+        // Filter based on file type
+        if let Some(ft) = entry.file_type() {
+            let is_dir = ft.is_dir();
+            let should_include = match file_type_filter {
+                FileTypeFilter::FilesOnly => !is_dir,
+                FileTypeFilter::DirsOnly => is_dir,
+                FileTypeFilter::Both => true,
+            };
+            if !should_include {
+                return None;
+            }
+        } else {
             return None;
         }
+
         let path = entry.path();
         match path.strip_prefix(search_directory) {
             Ok(rel_path) => rel_path.to_str(),

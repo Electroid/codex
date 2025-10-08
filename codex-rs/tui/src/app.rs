@@ -136,6 +136,9 @@ impl App {
         };
 
         let file_search = FileSearchManager::new(config.cwd.clone(), app_event_tx.clone());
+        for dir in &config.workspaces {
+            file_search.add_directory(dir.clone());
+        }
 
         let mut app = Self {
             server: conversation_manager,
@@ -306,9 +309,12 @@ impl App {
                 ));
                 tui.frame_requester().schedule_frame();
             }
-            AppEvent::StartFileSearch(query) => {
+            AppEvent::StartFileSearch {
+                query,
+                file_type_filter,
+            } => {
                 if !query.is_empty() {
-                    self.file_search.on_user_query(query);
+                    self.file_search.on_user_query(query, file_type_filter);
                 }
             }
             AppEvent::FileSearchResult { query, matches } => {
@@ -400,6 +406,14 @@ impl App {
                     ));
                 }
             },
+            AppEvent::AddDirectory(dir) => {
+                self.file_search.add_directory(dir.clone());
+                self.config.workspaces.push(dir);
+            }
+            AppEvent::RemoveDirectory(dir) => {
+                self.file_search.remove_directory(&dir);
+                self.config.workspaces.retain(|d| d != &dir);
+            }
         }
         Ok(true)
     }

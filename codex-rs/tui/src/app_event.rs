@@ -30,7 +30,10 @@ pub(crate) enum AppEvent {
     /// Kick off an asynchronous file search for the given query (text after
     /// the `@`). Previous searches may be cancelled by the app layer so there
     /// is at most one in-flight search.
-    StartFileSearch(String),
+    StartFileSearch {
+        query: String,
+        file_type_filter: codex_file_search::FileTypeFilter,
+    },
 
     /// Result of a completed asynchronous file search. The `query` echoes the
     /// original search term so the UI can decide whether the results are
@@ -87,4 +90,10 @@ pub(crate) enum AppEvent {
 
     /// Open the approval popup.
     FullScreenApprovalRequest(ApprovalRequest),
+
+    /// Add a directory to the workspace.
+    AddDirectory(PathBuf),
+
+    /// Remove a directory from the workspace.
+    RemoveDirectory(PathBuf),
 }

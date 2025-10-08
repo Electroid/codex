@@ -381,6 +381,11 @@ impl BottomPane {
         self.request_redraw();
     }
 
+    /// Update workspace paths for autocomplete in /remove-workspace.
+    pub(crate) fn set_workspaces(&mut self, workspaces: Vec<PathBuf>, cwd: PathBuf) {
+        self.composer.set_workspaces(workspaces, cwd);
+    }
+
     pub(crate) fn composer_is_empty(&self) -> bool {
         self.composer.is_empty()
     }

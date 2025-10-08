@@ -68,6 +68,10 @@ pub struct Cli {
     #[clap(long = "cd", short = 'C', value_name = "DIR")]
     pub cwd: Option<PathBuf>,
 
+    /// Add additional workspace directories for the agent to access.
+    #[arg(long = "add-dir", value_name = "DIR", value_delimiter = ',', num_args = 1..)]
+    pub workspaces: Vec<PathBuf>,
+
     /// Enable web search (off by default). When enabled, the native Responses `web_search` tool is available to the model (no per‑call approval).
     #[arg(long = "search", default_value_t = false)]
     pub web_search: bool,

@@ -133,12 +133,19 @@ pub async fn run_main(
     // canonicalize the cwd
     let cwd = cli.cwd.clone().map(|p| p.canonicalize().unwrap_or(p));
 
+    let workspaces = if cli.workspaces.is_empty() {
+        None
+    } else {
+        Some(cli.workspaces.clone())
+    };
+
     let overrides = ConfigOverrides {
         model,
         review_model: None,
         approval_policy,
         sandbox_mode,
         cwd,
+        workspaces,
         model_provider: model_provider_override,
         config_profile: cli.config_profile.clone(),
         codex_linux_sandbox_exe,

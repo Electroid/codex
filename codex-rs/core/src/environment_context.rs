@@ -24,6 +24,7 @@ pub enum NetworkAccess {
 #[serde(rename = "environment_context", rename_all = "snake_case")]
 pub(crate) struct EnvironmentContext {
     pub cwd: Option<PathBuf>,
+    pub workspaces: Option<Vec<PathBuf>>,
     pub approval_policy: Option<AskForApproval>,
     pub sandbox_mode: Option<SandboxMode>,
     pub network_access: Option<NetworkAccess>,
@@ -34,12 +35,14 @@ pub(crate) struct EnvironmentContext {
 impl EnvironmentContext {
     pub fn new(
         cwd: Option<PathBuf>,
+        workspaces: Option<Vec<PathBuf>>,
         approval_policy: Option<AskForApproval>,
         sandbox_policy: Option<SandboxPolicy>,
         shell: Option<Shell>,
     ) -> Self {
         Self {
             cwd,
+            workspaces,
             approval_policy,
             sandbox_mode: match sandbox_policy {
                 Some(SandboxPolicy::DangerFullAccess) => Some(SandboxMode::DangerFullAccess),
@@ -79,6 +82,7 @@ impl EnvironmentContext {
     pub fn equals_except_shell(&self, other: &EnvironmentContext) -> bool {
         let EnvironmentContext {
             cwd,
+            workspaces,
             approval_policy,
             sandbox_mode,
             network_access,
@@ -88,6 +92,7 @@ impl EnvironmentContext {
         } = other;
 
         self.cwd == *cwd
+            && self.workspaces == *workspaces
             && self.approval_policy == *approval_policy
             && self.sandbox_mode == *sandbox_mode
             && self.network_access == *network_access
@@ -97,11 +102,16 @@ impl EnvironmentContext {
 
 impl From<&TurnContext> for EnvironmentContext {
     fn from(turn_context: &TurnContext) -> Self {
+        let workspaces = if turn_context.workspaces.is_empty() {
+            None
+        } else {
+            Some(turn_context.workspaces.clone())
+        };
         Self::new(
             Some(turn_context.cwd.clone()),
+            workspaces,
             Some(turn_context.approval_policy),
             Some(turn_context.sandbox_policy.clone()),
-            // Shell is not configurable from turn to turn
             None,
         )
     }
@@ -126,6 +136,15 @@ impl EnvironmentContext {
         let mut lines = vec![ENVIRONMENT_CONTEXT_OPEN_TAG.to_string()];
         if let Some(cwd) = self.cwd {
             lines.push(format!("  <cwd>{}</cwd>", cwd.to_string_lossy()));
+        }
+        if let Some(workspaces) = self.workspaces {
+            if !workspaces.is_empty() {
+                lines.push("  <workspaces>".to_string());
+                for dir in workspaces {
+                    lines.push(format!("    <dir>{}</dir>", dir.to_string_lossy()));
+                }
+                lines.push("  </workspaces>".to_string());
+            }
         }
         if let Some(approval_policy) = self.approval_policy {
             lines.push(format!(
@@ -193,6 +212,7 @@ mod tests {
     fn serialize_workspace_write_environment_context() {
         let context = EnvironmentContext::new(
             Some(PathBuf::from("/repo")),
+            None,
             Some(AskForApproval::OnRequest),
             Some(workspace_write_policy(vec!["/repo", "/tmp"], false)),
             None,
@@ -213,8 +233,33 @@ mod tests {
     }
 
     #[test]
+    fn serialize_environment_context_includes_workspaces() {
+        let context = EnvironmentContext::new(
+            Some(PathBuf::from("/repo")),
+            Some(vec![PathBuf::from("/repo/extra"), PathBuf::from("/abs")]),
+            Some(AskForApproval::OnRequest),
+            Some(SandboxPolicy::new_read_only_policy()),
+            None,
+        );
+
+        let expected = r#"<environment_context>
+  <cwd>/repo</cwd>
+  <workspaces>
+    <dir>/repo/extra</dir>
+    <dir>/abs</dir>
+  </workspaces>
+  <approval_policy>on-request</approval_policy>
+  <sandbox_mode>read-only</sandbox_mode>
+  <network_access>restricted</network_access>
+</environment_context>"#;
+
+        assert_eq!(context.serialize_to_xml(), expected);
+    }
+
+    #[test]
     fn serialize_read_only_environment_context() {
         let context = EnvironmentContext::new(
+            None,
             None,
             Some(AskForApproval::Never),
             Some(SandboxPolicy::ReadOnly),
@@ -233,6 +278,7 @@ mod tests {
     #[test]
     fn serialize_full_access_environment_context() {
         let context = EnvironmentContext::new(
+            None,
             None,
             Some(AskForApproval::OnFailure),
             Some(SandboxPolicy::DangerFullAccess),
@@ -253,12 +299,14 @@ mod tests {
         // Approval policy
         let context1 = EnvironmentContext::new(
             Some(PathBuf::from("/repo")),
+            None,
             Some(AskForApproval::OnRequest),
             Some(workspace_write_policy(vec!["/repo"], false)),
             None,
         );
         let context2 = EnvironmentContext::new(
             Some(PathBuf::from("/repo")),
+            None,
             Some(AskForApproval::Never),
             Some(workspace_write_policy(vec!["/repo"], true)),
             None,
@@ -270,12 +318,14 @@ mod tests {
     fn equals_except_shell_compares_sandbox_policy() {
         let context1 = EnvironmentContext::new(
             Some(PathBuf::from("/repo")),
+            None,
             Some(AskForApproval::OnRequest),
             Some(SandboxPolicy::new_read_only_policy()),
             None,
         );
         let context2 = EnvironmentContext::new(
             Some(PathBuf::from("/repo")),
+            None,
             Some(AskForApproval::OnRequest),
             Some(SandboxPolicy::new_workspace_write_policy()),
             None,
@@ -288,12 +338,14 @@ mod tests {
     fn equals_except_shell_compares_workspace_write_policy() {
         let context1 = EnvironmentContext::new(
             Some(PathBuf::from("/repo")),
+            None,
             Some(AskForApproval::OnRequest),
             Some(workspace_write_policy(vec!["/repo", "/tmp", "/var"], false)),
             None,
         );
         let context2 = EnvironmentContext::new(
             Some(PathBuf::from("/repo")),
+            None,
             Some(AskForApproval::OnRequest),
             Some(workspace_write_policy(vec!["/repo", "/tmp"], true)),
             None,
@@ -306,6 +358,7 @@ mod tests {
     fn equals_except_shell_ignores_shell() {
         let context1 = EnvironmentContext::new(
             Some(PathBuf::from("/repo")),
+            None,
             Some(AskForApproval::OnRequest),
             Some(workspace_write_policy(vec!["/repo"], false)),
             Some(Shell::Bash(BashShell {
@@ -315,6 +368,7 @@ mod tests {
         );
         let context2 = EnvironmentContext::new(
             Some(PathBuf::from("/repo")),
+            None,
             Some(AskForApproval::OnRequest),
             Some(workspace_write_policy(vec!["/repo"], false)),
             Some(Shell::Zsh(ZshShell {

@@ -139,6 +139,10 @@ pub struct Config {
     /// resolved against this path.
     pub cwd: PathBuf,
 
+    /// Additional workspace directories accessible during the session.
+    /// These are supplementary search paths for file operations and tool calls.
+    pub workspaces: Vec<PathBuf>,
+
     /// Definition for MCP servers that Codex can reach out to for tool calls.
     pub mcp_servers: HashMap<String, McpServerConfig>,
 
@@ -896,6 +900,7 @@ pub struct ConfigOverrides {
     pub model: Option<String>,
     pub review_model: Option<String>,
     pub cwd: Option<PathBuf>,
+    pub workspaces: Option<Vec<PathBuf>>,
     pub approval_policy: Option<AskForApproval>,
     pub sandbox_mode: Option<SandboxMode>,
     pub model_provider: Option<String>,
@@ -924,6 +929,7 @@ impl Config {
             model,
             review_model: override_review_model,
             cwd,
+            workspaces,
             approval_policy,
             sandbox_mode,
             model_provider,
@@ -998,6 +1004,41 @@ impl Config {
             }
         };
 
+        let resolved_workspaces = workspaces
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|dir| {
+                let resolved = if dir.is_absolute() {
+                    dir
+                } else {
+                    let mut base = resolved_cwd.clone();
+                    base.push(dir);
+                    base
+                };
+                match resolved.canonicalize() {
+                    Ok(canonical) => {
+                        if canonical.is_dir() {
+                            Some(canonical)
+                        } else {
+                            tracing::warn!(
+                                "Additional dir is not a directory: {}",
+                                resolved.display()
+                            );
+                            None
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to resolve additional dir {}: {}",
+                            resolved.display(),
+                            e
+                        );
+                        None
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
+
         let history = cfg.history.unwrap_or_default();
 
         let tools_web_search_request = override_tools_web_search_request
@@ -1064,6 +1105,7 @@ impl Config {
             model_provider_id,
             model_provider,
             cwd: resolved_cwd,
+            workspaces: resolved_workspaces,
             approval_policy: approval_policy
                 .or(config_profile.approval_policy)
                 .or(cfg.approval_policy)
@@ -1895,6 +1937,7 @@ model_verbosity = "high"
                 user_instructions: None,
                 notify: None,
                 cwd: fixture.cwd(),
+                workspaces: Vec::new(),
                 mcp_servers: HashMap::new(),
                 model_providers: fixture.model_provider_map.clone(),
                 project_doc_max_bytes: PROJECT_DOC_MAX_BYTES,
@@ -1957,6 +2000,7 @@ model_verbosity = "high"
             user_instructions: None,
             notify: None,
             cwd: fixture.cwd(),
+            workspaces: Vec::new(),
             mcp_servers: HashMap::new(),
             model_providers: fixture.model_provider_map.clone(),
             project_doc_max_bytes: PROJECT_DOC_MAX_BYTES,
@@ -2034,6 +2078,7 @@ model_verbosity = "high"
             user_instructions: None,
             notify: None,
             cwd: fixture.cwd(),
+            workspaces: Vec::new(),
             mcp_servers: HashMap::new(),
             model_providers: fixture.model_provider_map.clone(),
             project_doc_max_bytes: PROJECT_DOC_MAX_BYTES,
@@ -2097,6 +2142,7 @@ model_verbosity = "high"
             user_instructions: None,
             notify: None,
             cwd: fixture.cwd(),
+            workspaces: Vec::new(),
             mcp_servers: HashMap::new(),
             model_providers: fixture.model_provider_map.clone(),
             project_doc_max_bytes: PROJECT_DOC_MAX_BYTES,
