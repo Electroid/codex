@@ -15,6 +15,7 @@
 
 use crate::config::Config;
 use dunce::canonicalize as normalize_path;
+use std::path::Path;
 use std::path::PathBuf;
 use tokio::io::AsyncReadExt;
 use tracing::error;
@@ -25,6 +26,18 @@ pub const DEFAULT_PROJECT_DOC_FILENAME: &str = "AGENTS.md";
 /// When both `Config::instructions` and the project doc are present, they will
 /// be concatenated with the following separator.
 const PROJECT_DOC_SEPARATOR: &str = "\n\n--- project-doc ---\n\n";
+
+pub(crate) fn merge_custom_and_project_docs(
+    custom: Option<&str>,
+    project_docs: Option<String>,
+) -> Option<String> {
+    match (custom, project_docs) {
+        (Some(c), Some(p)) => Some(format!("{c}{PROJECT_DOC_SEPARATOR}{p}")),
+        (None, Some(p)) => Some(p),
+        (Some(c), None) => Some(c.to_string()),
+        (None, None) => None,
+    }
+}
 
 /// Combines `Config::instructions` and `AGENTS.md` (if present) into a single
 /// string of instructions.
@@ -41,6 +54,105 @@ pub(crate) async fn get_user_instructions(config: &Config) -> Option<String> {
             error!("error trying to find project doc: {e:#}");
             config.user_instructions.clone()
         }
+    }
+}
+
+pub(crate) fn discover_project_doc_paths_from_cwd(
+    cwd: &Path,
+    fallback_filenames: &[String],
+) -> std::io::Result<Vec<PathBuf>> {
+    let mut dir = cwd.to_path_buf();
+    if let Ok(canon) = normalize_path(&dir) {
+        dir = canon;
+    }
+
+    let mut chain: Vec<PathBuf> = vec![dir.clone()];
+    let mut git_root: Option<PathBuf> = None;
+    let mut cursor = dir;
+    while let Some(parent) = cursor.parent() {
+        let git_marker = cursor.join(".git");
+        let git_exists = match std::fs::metadata(&git_marker) {
+            Ok(_) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => return Err(e),
+        };
+
+        if git_exists {
+            git_root = Some(cursor.clone());
+            break;
+        }
+        chain.push(parent.to_path_buf());
+        cursor = parent.to_path_buf();
+    }
+
+    if let Some(root) = git_root {
+        chain.retain(|p| p.starts_with(&root));
+    }
+
+    chain.reverse();
+
+    let mut result = Vec::new();
+    for dir_path in chain {
+        let candidate = dir_path.join(DEFAULT_PROJECT_DOC_FILENAME);
+        if candidate.exists() && candidate.is_file() {
+            result.push(candidate);
+            continue;
+        }
+
+        for fallback in fallback_filenames {
+            let fallback_candidate = dir_path.join(fallback);
+            if fallback_candidate.exists() && fallback_candidate.is_file() {
+                result.push(fallback_candidate);
+                break;
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+pub(crate) async fn reload_project_docs_from_disk(
+    cwd: &Path,
+    max_bytes: u64,
+    fallback_filenames: &[String],
+) -> Option<String> {
+    if max_bytes == 0 {
+        return None;
+    }
+
+    let paths = discover_project_doc_paths_from_cwd(cwd, fallback_filenames).ok()?;
+    if paths.is_empty() {
+        return None;
+    }
+
+    let mut remaining = max_bytes;
+    let mut parts = Vec::new();
+
+    for p in paths {
+        if remaining == 0 {
+            break;
+        }
+
+        let data = match tokio::fs::read(&p).await {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                error!("error reading {}: {e:#}", p.display());
+                continue;
+            }
+        };
+
+        let size = data.len() as u64;
+        if let Ok(s) = String::from_utf8(data) {
+            parts.push(s);
+            remaining = remaining.saturating_sub(size);
+        }
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
     }
 }
 
@@ -420,5 +532,127 @@ mod tests {
                 .to_string_lossy()
                 .eq(DEFAULT_PROJECT_DOC_FILENAME)
         );
+    }
+
+    #[test]
+    fn discover_from_cwd_finds_agents_md() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join(".git")).unwrap();
+        fs::write(temp.path().join("AGENTS.md"), "content").unwrap();
+
+        let paths = discover_project_doc_paths_from_cwd(temp.path(), &[]).unwrap();
+        assert_eq!(paths.len(), 1);
+        assert!(paths[0].ends_with("AGENTS.md"));
+    }
+
+    #[test]
+    fn discover_from_cwd_empty_when_no_file() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join(".git")).unwrap();
+        let paths = discover_project_doc_paths_from_cwd(temp.path(), &[]).unwrap();
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn discover_from_cwd_finds_hierarchy() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join(".git")).unwrap();
+        fs::write(temp.path().join("AGENTS.md"), "root").unwrap();
+
+        let subdir = temp.path().join("sub");
+        fs::create_dir(&subdir).unwrap();
+        fs::write(subdir.join("AGENTS.md"), "sub").unwrap();
+
+        let paths = discover_project_doc_paths_from_cwd(&subdir, &[]).unwrap();
+        assert_eq!(paths.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn reload_from_disk_returns_content() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("AGENTS.md"), "test").unwrap();
+
+        let content = reload_project_docs_from_disk(temp.path(), 100_000, &[]).await;
+        assert_eq!(content, Some("test".to_string()));
+    }
+
+    #[tokio::test]
+    async fn reload_from_disk_none_when_missing() {
+        let temp = TempDir::new().unwrap();
+        let content = reload_project_docs_from_disk(temp.path(), 100_000, &[]).await;
+        assert_eq!(content, None);
+    }
+
+    #[tokio::test]
+    async fn reload_from_disk_concatenates() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join(".git")).unwrap();
+        fs::write(temp.path().join("AGENTS.md"), "root").unwrap();
+
+        let subdir = temp.path().join("sub");
+        fs::create_dir(&subdir).unwrap();
+        fs::write(subdir.join("AGENTS.md"), "sub").unwrap();
+
+        let content = reload_project_docs_from_disk(&subdir, 100_000, &[]).await;
+        assert_eq!(content, Some("root\n\nsub".to_string()));
+    }
+
+    #[test]
+    fn discover_from_cwd_outside_git_repo() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("AGENTS.md"), "cwd").unwrap();
+
+        let paths = discover_project_doc_paths_from_cwd(temp.path(), &[]).unwrap();
+        assert!(
+            !paths.is_empty(),
+            "should find at least the cwd AGENTS.md (may find more if walking up)"
+        );
+        assert!(paths.iter().any(|p| p.ends_with("AGENTS.md")));
+    }
+
+    #[test]
+    fn discover_from_cwd_excludes_above_git_root() {
+        let temp = TempDir::new().unwrap();
+        let parent = temp.path().parent().unwrap();
+        fs::write(parent.join("AGENTS.md"), "above").unwrap();
+
+        fs::create_dir(temp.path().join(".git")).unwrap();
+        fs::write(temp.path().join("AGENTS.md"), "root").unwrap();
+
+        let subdir = temp.path().join("sub");
+        fs::create_dir(&subdir).unwrap();
+
+        let paths = discover_project_doc_paths_from_cwd(&subdir, &[]).unwrap();
+        assert_eq!(paths.len(), 1, "should only find file at git root");
+        assert!(paths[0].ends_with("AGENTS.md"));
+
+        let content = std::fs::read_to_string(&paths[0]).unwrap();
+        assert_eq!(content, "root", "should not include file above git root");
+
+        fs::remove_file(parent.join("AGENTS.md")).ok();
+    }
+
+    #[tokio::test]
+    async fn reload_from_disk_handles_multiple_files() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join(".git")).unwrap();
+        fs::write(temp.path().join("AGENTS.md"), "first").unwrap();
+
+        let subdir = temp.path().join("sub");
+        fs::create_dir(&subdir).unwrap();
+        fs::write(subdir.join("AGENTS.md"), "second").unwrap();
+
+        let content = reload_project_docs_from_disk(&subdir, 100_000, &[]).await;
+        assert_eq!(content, Some("first\n\nsecond".to_string()));
+    }
+
+    #[tokio::test]
+    async fn reload_from_disk_skips_invalid_utf8() {
+        let temp = TempDir::new().unwrap();
+        let invalid_bytes = vec![0xFF, 0xFE, 0xFD];
+        fs::write(temp.path().join("AGENTS.md"), &invalid_bytes).unwrap();
+
+        let content = reload_project_docs_from_disk(temp.path(), 100_000, &[]).await;
+        assert_eq!(content, None, "should skip files with invalid UTF-8");
     }
 }

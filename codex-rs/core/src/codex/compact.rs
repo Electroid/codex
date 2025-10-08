@@ -82,16 +82,6 @@ async fn run_compact_task_inner(
     let max_retries = turn_context.client.get_provider().stream_max_retries();
     let mut retries = 0;
 
-    let rollout_item = RolloutItem::TurnContext(TurnContextItem {
-        cwd: turn_context.cwd.clone(),
-        approval_policy: turn_context.approval_policy,
-        sandbox_policy: turn_context.sandbox_policy.clone(),
-        model: turn_context.client.get_model(),
-        effort: turn_context.client.get_reasoning_effort(),
-        summary: turn_context.client.get_reasoning_summary(),
-    });
-    sess.persist_rollout_items(&[rollout_item]).await;
-
     loop {
         let attempt_result =
             drain_to_completed(&sess, turn_context.as_ref(), &sub_id, &prompt).await;
@@ -145,7 +135,46 @@ async fn run_compact_task_inner(
     let history_snapshot = sess.history_snapshot().await;
     let summary_text = get_last_assistant_message_from_turn(&history_snapshot).unwrap_or_default();
     let user_messages = collect_user_messages(&history_snapshot);
-    let initial_context = sess.build_initial_context(turn_context.as_ref());
+
+    let reloaded_project_docs = crate::project_doc::reload_project_docs_from_disk(
+        &turn_context.cwd,
+        turn_context.project_doc_max_bytes,
+        &turn_context.project_doc_fallback_filenames,
+    )
+    .await;
+    let merged_user_instructions = crate::project_doc::merge_custom_and_project_docs(
+        turn_context.custom_user_instructions.as_deref(),
+        reloaded_project_docs,
+    );
+
+    let updated_turn_context = Arc::new(TurnContext {
+        user_instructions: merged_user_instructions,
+        custom_user_instructions: turn_context.custom_user_instructions.clone(),
+        project_doc_max_bytes: turn_context.project_doc_max_bytes,
+        project_doc_fallback_filenames: turn_context.project_doc_fallback_filenames.clone(),
+        client: turn_context.client.clone(),
+        cwd: turn_context.cwd.clone(),
+        base_instructions: turn_context.base_instructions.clone(),
+        approval_policy: turn_context.approval_policy,
+        sandbox_policy: turn_context.sandbox_policy.clone(),
+        shell_environment_policy: turn_context.shell_environment_policy.clone(),
+        tools_config: turn_context.tools_config.clone(),
+        is_review_mode: turn_context.is_review_mode,
+        final_output_json_schema: turn_context.final_output_json_schema.clone(),
+    });
+
+    let rollout_item = RolloutItem::TurnContext(TurnContextItem {
+        cwd: updated_turn_context.cwd.clone(),
+        approval_policy: updated_turn_context.approval_policy,
+        sandbox_policy: updated_turn_context.sandbox_policy.clone(),
+        model: updated_turn_context.client.get_model(),
+        effort: updated_turn_context.client.get_reasoning_effort(),
+        summary: updated_turn_context.client.get_reasoning_summary(),
+        user_instructions: updated_turn_context.user_instructions.clone(),
+    });
+    sess.persist_rollout_items(&[rollout_item]).await;
+
+    let initial_context = sess.build_initial_context(updated_turn_context.as_ref());
     let new_history = build_compacted_history(initial_context, &user_messages, &summary_text);
     sess.replace_history(new_history).await;
 
@@ -399,6 +428,62 @@ mod tests {
         assert!(
             bridge_text.contains("SUMMARY"),
             "bridge should include the provided summary text"
+        );
+    }
+
+    #[test]
+    fn build_compacted_history_preserves_initial_context() {
+        let user_instructions = ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "<user_instructions>\nTest instructions from AGENTS.md\n</user_instructions>"
+                    .to_string(),
+            }],
+        };
+
+        let env_context = ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "<ENVIRONMENT_CONTEXT>cwd=/test</ENVIRONMENT_CONTEXT>".to_string(),
+            }],
+        };
+
+        let initial_context = vec![user_instructions.clone(), env_context.clone()];
+        let user_messages = vec!["Hello".to_string(), "World".to_string()];
+        let summary = "This is a summary";
+
+        let compacted = build_compacted_history(initial_context, &user_messages, summary);
+
+        assert!(
+            compacted.len() >= 3,
+            "compacted history should have initial_context (2 items) + bridge (1 item)"
+        );
+
+        assert_eq!(
+            compacted[0], user_instructions,
+            "user instructions should be preserved as first item"
+        );
+        assert_eq!(
+            compacted[1], env_context,
+            "environment context should be preserved as second item"
+        );
+
+        let bridge_text = match &compacted[2] {
+            ResponseItem::Message { role, content, .. } if role == "user" => {
+                content_items_to_text(content).unwrap_or_default()
+            }
+            other => panic!("expected bridge message as third item, got {other:?}"),
+        };
+
+        assert!(
+            bridge_text.contains(summary),
+            "bridge should contain the summary"
+        );
+        assert!(
+            bridge_text.contains("Hello") && bridge_text.contains("World"),
+            "bridge should contain user messages"
         );
     }
 }

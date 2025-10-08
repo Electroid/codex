@@ -1035,6 +1035,8 @@ pub struct TurnContextItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<ReasoningEffortConfig>,
     pub summary: ReasoningSummaryConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_instructions: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
