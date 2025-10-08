@@ -207,6 +207,28 @@ pub(crate) fn get_limits_duration(windows_minutes: u64) -> String {
     }
 }
 
+fn effective_content_width(terminal_width: u16, config_max: Option<u16>) -> u16 {
+    const MIN_WIDTH: u16 = 20;
+    match config_max {
+        Some(max) => terminal_width.min(max).max(MIN_WIDTH),
+        None => terminal_width,
+    }
+}
+
+#[cfg(test)]
+mod width_tests {
+    use super::*;
+
+    #[test]
+    fn effective_content_width_logic() {
+        assert_eq!(effective_content_width(200, None), 200);
+        assert_eq!(effective_content_width(200, Some(120)), 120);
+        assert_eq!(effective_content_width(80, Some(120)), 80);
+        assert_eq!(effective_content_width(100, Some(1)), 20);
+        assert_eq!(effective_content_width(100, Some(0)), 20);
+    }
+}
+
 /// Common initialization parameters shared by all `ChatWidget` constructors.
 pub(crate) struct ChatWidgetInit {
     pub(crate) config: Config,
@@ -861,14 +883,14 @@ impl ChatWidget {
         }
     }
 
-    fn layout_areas(&self, area: Rect) -> [Rect; 3] {
+    fn layout_areas(&self, area: Rect, content_width: u16) -> [Rect; 3] {
         let bottom_min = self.bottom_pane.desired_height(area.width).min(area.height);
         let remaining = area.height.saturating_sub(bottom_min);
 
         let active_desired = self
             .active_cell
             .as_ref()
-            .map_or(0, |c| c.desired_height(area.width) + 1);
+            .map_or(0, |c| c.desired_height(content_width) + 1);
         let active_height = active_desired.min(remaining);
         // Note: no header area; remaining is not used beyond computing active height.
 
@@ -2109,14 +2131,16 @@ impl ChatWidget {
     }
 
     pub fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
-        let [_, _, bottom_pane_area] = self.layout_areas(area);
+        let effective_width = effective_content_width(area.width, self.config.tui.max_width);
+        let [_, _, bottom_pane_area] = self.layout_areas(area, effective_width);
         self.bottom_pane.cursor_pos(bottom_pane_area)
     }
 }
 
 impl WidgetRef for &ChatWidget {
     fn render_ref(&self, area: Rect, buf: &mut Buffer) {
-        let [_, active_cell_area, bottom_pane_area] = self.layout_areas(area);
+        let effective_width = effective_content_width(area.width, self.config.tui.max_width);
+        let [_, active_cell_area, bottom_pane_area] = self.layout_areas(area, effective_width);
         (&self.bottom_pane).render(bottom_pane_area, buf);
         if !active_cell_area.is_empty()
             && let Some(cell) = &self.active_cell
@@ -2130,7 +2154,7 @@ impl WidgetRef for &ChatWidget {
                 tool.render_ref(area, buf);
             }
         }
-        self.last_rendered_width.set(Some(area.width as usize));
+        self.last_rendered_width.set(Some(effective_width as usize));
     }
 }
 

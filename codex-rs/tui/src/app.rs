@@ -202,15 +202,18 @@ impl App {
                     {
                         return Ok(true);
                     }
-                    tui.draw(
-                        self.chat_widget.desired_height(tui.terminal.size()?.width),
-                        |frame| {
-                            frame.render_widget_ref(&self.chat_widget, frame.area());
-                            if let Some((x, y)) = self.chat_widget.cursor_pos(frame.area()) {
-                                frame.set_cursor_position((x, y));
-                            }
-                        },
-                    )?;
+                    let terminal_width = tui.terminal.size()?.width;
+                    let effective_width = self
+                        .config
+                        .tui
+                        .max_width
+                        .map_or(terminal_width, |max| terminal_width.min(max));
+                    tui.draw(self.chat_widget.desired_height(effective_width), |frame| {
+                        frame.render_widget_ref(&self.chat_widget, frame.area());
+                        if let Some((x, y)) = self.chat_widget.cursor_pos(frame.area()) {
+                            frame.set_cursor_position((x, y));
+                        }
+                    })?;
                 }
             }
         }
@@ -239,7 +242,13 @@ impl App {
                     tui.frame_requester().schedule_frame();
                 }
                 self.transcript_cells.push(cell.clone());
-                let mut display = cell.display_lines(tui.terminal.last_known_screen_size.width);
+                let terminal_width = tui.terminal.last_known_screen_size.width;
+                let effective_width = self
+                    .config
+                    .tui
+                    .max_width
+                    .map_or(terminal_width, |max| terminal_width.min(max));
+                let mut display = cell.display_lines(effective_width);
                 if !display.is_empty() {
                     // Only insert a separating blank line for new cells that are not
                     // part of an ongoing stream. Streaming continuations should not

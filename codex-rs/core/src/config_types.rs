@@ -299,6 +299,9 @@ pub struct Tui {
     /// Defaults to `false`.
     #[serde(default)]
     pub notifications: Notifications,
+
+    #[serde(default)]
+    pub max_width: Option<u16>,
 }
 
 #[derive(Deserialize, Debug, Clone, PartialEq, Default)]
