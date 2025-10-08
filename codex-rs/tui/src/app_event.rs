@@ -87,4 +87,7 @@ pub(crate) enum AppEvent {
 
     /// Open the approval popup.
     FullScreenApprovalRequest(ApprovalRequest),
+
+    /// Update the usage status bar with new rate limit data.
+    UpdateRateLimits(Option<crate::status::RateLimitSnapshotDisplay>),
 }

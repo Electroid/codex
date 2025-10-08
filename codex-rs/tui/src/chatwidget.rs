@@ -85,6 +85,7 @@ use crate::slash_command::SlashCommand;
 use crate::status::RateLimitSnapshotDisplay;
 use crate::text_formatting::truncate_text;
 use crate::tui::FrameRequester;
+use crate::usage_status_bar::UsageStatusText;
 mod interrupts;
 use self::interrupts::InterruptManager;
 mod agent;
@@ -440,7 +441,9 @@ impl ChatWidget {
             );
 
             let display = crate::status::rate_limit_snapshot_display(&snapshot, Local::now());
-            self.rate_limit_snapshot = Some(display);
+            self.rate_limit_snapshot = Some(display.clone());
+            self.app_event_tx
+                .send(crate::app_event::AppEvent::UpdateRateLimits(Some(display)));
 
             if !warnings.is_empty() {
                 for warning in warnings {
@@ -450,6 +453,8 @@ impl ChatWidget {
             }
         } else {
             self.rate_limit_snapshot = None;
+            self.app_event_tx
+                .send(crate::app_event::AppEvent::UpdateRateLimits(None));
         }
     }
     /// Finalize any active exec as failed and stop/clear running UI state.
@@ -1823,6 +1828,10 @@ impl ChatWidget {
     /// Set the reasoning effort in the widget's config copy.
     pub(crate) fn set_reasoning_effort(&mut self, effort: Option<ReasoningEffortConfig>) {
         self.config.model_reasoning_effort = effort;
+    }
+
+    pub(crate) fn set_usage_status(&mut self, status: Option<UsageStatusText>) {
+        self.bottom_pane.set_usage_status(status);
     }
 
     /// Set the model in the widget's config copy.

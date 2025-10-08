@@ -1,7 +1,5 @@
 use crate::exec_command::relativize_to_home;
 use crate::text_formatting;
-use chrono::DateTime;
-use chrono::Local;
 use codex_core::auth::get_auth_file;
 use codex_core::auth::try_read_auth_json;
 use codex_core::config::Config;
@@ -165,12 +163,19 @@ pub(crate) fn format_directory_display(directory: &Path, max_width: Option<usize
     formatted
 }
 
-pub(crate) fn format_reset_timestamp(dt: DateTime<Local>, captured_at: DateTime<Local>) -> String {
-    let time = dt.format("%H:%M").to_string();
-    if dt.date_naive() == captured_at.date_naive() {
-        time
+pub(crate) fn format_reset_duration(resets_in_seconds: u64) -> String {
+    let minutes = resets_in_seconds / 60;
+    let hours = minutes / 60;
+    let days = hours / 24;
+
+    if days > 0 {
+        format!("in {days}d")
+    } else if hours > 0 {
+        format!("in {hours}h")
+    } else if minutes > 0 {
+        format!("in {minutes}m")
     } else {
-        format!("{time} on {}", dt.format("%-d %b"))
+        "in <1m".to_string()
     }
 }
 
@@ -185,4 +190,36 @@ pub(crate) fn title_case(s: &str) -> String {
     };
     let rest: String = chars.as_str().to_ascii_lowercase();
     first.to_uppercase().collect::<String>() + &rest
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_reset_duration_days() {
+        assert_eq!(format_reset_duration(86400), "in 1d");
+        assert_eq!(format_reset_duration(172800), "in 2d");
+    }
+
+    #[test]
+    fn test_format_reset_duration_hours() {
+        assert_eq!(format_reset_duration(3600), "in 1h");
+        assert_eq!(format_reset_duration(7200), "in 2h");
+        assert_eq!(format_reset_duration(10800), "in 3h");
+    }
+
+    #[test]
+    fn test_format_reset_duration_minutes() {
+        assert_eq!(format_reset_duration(60), "in 1m");
+        assert_eq!(format_reset_duration(1800), "in 30m");
+        assert_eq!(format_reset_duration(3540), "in 59m");
+    }
+
+    #[test]
+    fn test_format_reset_duration_less_than_minute() {
+        assert_eq!(format_reset_duration(0), "in <1m");
+        assert_eq!(format_reset_duration(30), "in <1m");
+        assert_eq!(format_reset_duration(59), "in <1m");
+    }
 }

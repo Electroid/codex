@@ -9,4 +9,7 @@ pub(crate) use rate_limits::RateLimitSnapshotDisplay;
 pub(crate) use rate_limits::rate_limit_snapshot_display;
 
 #[cfg(test)]
+pub(crate) use rate_limits::RateLimitWindowDisplay;
+
+#[cfg(test)]
 mod tests;

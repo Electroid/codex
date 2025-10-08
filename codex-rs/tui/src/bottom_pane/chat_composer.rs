@@ -39,6 +39,7 @@ use crate::slash_command::SlashCommand;
 use crate::slash_command::built_in_slash_commands;
 use crate::style::user_message_style;
 use crate::terminal_palette;
+use crate::usage_status_bar::UsageStatusText;
 use codex_protocol::custom_prompts::CustomPrompt;
 use codex_protocol::custom_prompts::PROMPTS_CMD_PREFIX;
 
@@ -110,6 +111,7 @@ pub(crate) struct ChatComposer {
     footer_mode: FooterMode,
     footer_hint_override: Option<Vec<(String, String)>>,
     context_window_percent: Option<u8>,
+    usage_status: Option<UsageStatusText>,
 }
 
 /// Popup state – at most one can be visible at any time.
@@ -153,6 +155,7 @@ impl ChatComposer {
             footer_mode: FooterMode::ShortcutPrompt,
             footer_hint_override: None,
             context_window_percent: None,
+            usage_status: None,
         };
         // Apply configuration via the setter to keep side-effects centralized.
         this.set_disable_paste_burst(disable_paste_burst);
@@ -163,7 +166,7 @@ impl ChatComposer {
         let footer_props = self.footer_props();
         let footer_hint_height = self
             .custom_footer_height()
-            .unwrap_or_else(|| footer_height(footer_props));
+            .unwrap_or_else(|| footer_height(&footer_props));
         let footer_spacing = Self::footer_spacing(footer_hint_height);
         let footer_total_height = footer_hint_height + footer_spacing;
         self.textarea
@@ -180,7 +183,7 @@ impl ChatComposer {
         let footer_props = self.footer_props();
         let footer_hint_height = self
             .custom_footer_height()
-            .unwrap_or_else(|| footer_height(footer_props));
+            .unwrap_or_else(|| footer_height(&footer_props));
         let footer_spacing = Self::footer_spacing(footer_hint_height);
         let footer_total_height = footer_hint_height + footer_spacing;
         let popup_constraint = match &self.active_popup {
@@ -1338,6 +1341,7 @@ impl ChatComposer {
             use_shift_enter_hint: self.use_shift_enter_hint,
             is_task_running: self.is_task_running,
             context_window_percent: self.context_window_percent,
+            usage_status: self.usage_status.clone(),
         }
     }
 
@@ -1474,6 +1478,12 @@ impl ChatComposer {
         }
     }
 
+    pub(crate) fn set_usage_status(&mut self, status: Option<UsageStatusText>) {
+        if self.usage_status != status {
+            self.usage_status = status;
+        }
+    }
+
     pub(crate) fn set_esc_backtrack_hint(&mut self, show: bool) {
         self.esc_backtrack_hint = show;
         if show {
@@ -1498,7 +1508,7 @@ impl WidgetRef for ChatComposer {
                 let footer_props = self.footer_props();
                 let custom_height = self.custom_footer_height();
                 let footer_hint_height =
-                    custom_height.unwrap_or_else(|| footer_height(footer_props));
+                    custom_height.unwrap_or_else(|| footer_height(&footer_props));
                 let footer_spacing = Self::footer_spacing(footer_hint_height);
                 let hint_rect = if footer_spacing > 0 && footer_hint_height > 0 {
                     let [_, hint_rect] = Layout::vertical([
@@ -1694,7 +1704,7 @@ mod tests {
         );
         setup(&mut composer);
         let footer_props = composer.footer_props();
-        let footer_lines = footer_height(footer_props);
+        let footer_lines = footer_height(&footer_props);
         let footer_spacing = ChatComposer::footer_spacing(footer_lines);
         let height = footer_lines + footer_spacing + 8;
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();

@@ -1,12 +1,8 @@
 use crate::chatwidget::get_limits_duration;
 
-use super::helpers::format_reset_timestamp;
-use chrono::DateTime;
-use chrono::Duration as ChronoDuration;
-use chrono::Local;
+use super::helpers::format_reset_duration;
 use codex_core::protocol::RateLimitSnapshot;
 use codex_core::protocol::RateLimitWindow;
-use std::convert::TryFrom;
 
 const STATUS_LIMIT_BAR_SEGMENTS: usize = 20;
 const STATUS_LIMIT_BAR_FILLED: &str = "█";
@@ -33,12 +29,8 @@ pub(crate) struct RateLimitWindowDisplay {
 }
 
 impl RateLimitWindowDisplay {
-    fn from_window(window: &RateLimitWindow, captured_at: DateTime<Local>) -> Self {
-        let resets_at = window
-            .resets_in_seconds
-            .and_then(|seconds| i64::try_from(seconds).ok())
-            .and_then(|secs| captured_at.checked_add_signed(ChronoDuration::seconds(secs)))
-            .map(|dt| format_reset_timestamp(dt, captured_at));
+    fn from_window(window: &RateLimitWindow) -> Self {
+        let resets_at = window.resets_in_seconds.map(format_reset_duration);
 
         Self {
             used_percent: window.used_percent,
@@ -56,17 +48,17 @@ pub(crate) struct RateLimitSnapshotDisplay {
 
 pub(crate) fn rate_limit_snapshot_display(
     snapshot: &RateLimitSnapshot,
-    captured_at: DateTime<Local>,
+    _captured_at: chrono::DateTime<chrono::Local>,
 ) -> RateLimitSnapshotDisplay {
     RateLimitSnapshotDisplay {
         primary: snapshot
             .primary
             .as_ref()
-            .map(|window| RateLimitWindowDisplay::from_window(window, captured_at)),
+            .map(RateLimitWindowDisplay::from_window),
         secondary: snapshot
             .secondary
             .as_ref()
-            .map(|window| RateLimitWindowDisplay::from_window(window, captured_at)),
+            .map(RateLimitWindowDisplay::from_window),
     }
 }
 
