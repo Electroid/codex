@@ -2,6 +2,7 @@ use crate::key_hint;
 use crate::key_hint::KeyBinding;
 use crate::render::line_utils::prefix_lines;
 use crate::ui_consts::FOOTER_INDENT_COLS;
+use crate::usage_status_bar::UsageStatusText;
 use crossterm::event::KeyCode;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -11,13 +12,14 @@ use ratatui::text::Span;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct FooterProps {
     pub(crate) mode: FooterMode,
     pub(crate) esc_backtrack_hint: bool,
     pub(crate) use_shift_enter_hint: bool,
     pub(crate) is_task_running: bool,
     pub(crate) context_window_percent: Option<u8>,
+    pub(crate) usage_status: Option<UsageStatusText>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -58,20 +60,20 @@ pub(crate) fn reset_mode_after_activity(current: FooterMode) -> FooterMode {
     }
 }
 
-pub(crate) fn footer_height(props: FooterProps) -> u16 {
-    footer_lines(props).len() as u16
+pub(crate) fn footer_height(props: &FooterProps) -> u16 {
+    footer_lines(props.clone(), 80).len() as u16
 }
 
 pub(crate) fn render_footer(area: Rect, buf: &mut Buffer, props: FooterProps) {
     Paragraph::new(prefix_lines(
-        footer_lines(props),
+        footer_lines(props, area.width),
         " ".repeat(FOOTER_INDENT_COLS).into(),
         " ".repeat(FOOTER_INDENT_COLS).into(),
     ))
     .render(area, buf);
 }
 
-fn footer_lines(props: FooterProps) -> Vec<Line<'static>> {
+fn footer_lines(props: FooterProps, width: u16) -> Vec<Line<'static>> {
     match props.mode {
         FooterMode::CtrlCReminder => vec![ctrl_c_reminder_line(CtrlCReminderState {
             is_task_running: props.is_task_running,
@@ -80,10 +82,7 @@ fn footer_lines(props: FooterProps) -> Vec<Line<'static>> {
             if props.is_task_running {
                 vec![context_window_line(props.context_window_percent)]
             } else {
-                vec![Line::from(vec![
-                    key_hint::plain(KeyCode::Char('?')).into(),
-                    " for shortcuts".dim(),
-                ])]
+                vec![shortcut_line_with_usage_status(props.usage_status, width)]
             }
         }
         FooterMode::ShortcutOverlay => shortcut_overlay_lines(ShortcutsState {
@@ -91,8 +90,66 @@ fn footer_lines(props: FooterProps) -> Vec<Line<'static>> {
             esc_backtrack_hint: props.esc_backtrack_hint,
         }),
         FooterMode::EscHint => vec![esc_hint_line(props.esc_backtrack_hint)],
-        FooterMode::Empty => Vec::new(),
+        FooterMode::Empty => {
+            if let Some(status) = props.usage_status {
+                vec![usage_status_only_line(status, width)]
+            } else {
+                Vec::new()
+            }
+        }
     }
+}
+
+fn shortcut_line_with_usage_status(
+    usage_status: Option<UsageStatusText>,
+    width: u16,
+) -> Line<'static> {
+    use unicode_width::UnicodeWidthStr;
+
+    let mut spans = vec![
+        key_hint::plain(KeyCode::Char('?')).into(),
+        " for shortcuts".dim(),
+    ];
+
+    if let Some(status) = usage_status {
+        let left_text = "? for shortcuts";
+        let status_width = UnicodeWidthStr::width(status.text.as_str());
+        let left_width = UnicodeWidthStr::width(left_text);
+
+        let available_width = (width as usize).saturating_sub(FOOTER_INDENT_COLS * 2);
+
+        if left_width + status_width + 3 <= available_width {
+            let padding = available_width - left_width - status_width;
+            spans.push(" ".repeat(padding).into());
+            let color = if status.at_limit {
+                ratatui::style::Color::Red
+            } else {
+                ratatui::style::Color::Yellow
+            };
+            spans.push(Span::from(status.text).fg(color));
+        }
+    }
+
+    Line::from(spans)
+}
+
+fn usage_status_only_line(status: UsageStatusText, width: u16) -> Line<'static> {
+    use unicode_width::UnicodeWidthStr;
+
+    let status_width = UnicodeWidthStr::width(status.text.as_str());
+    let available_width = (width as usize).saturating_sub(FOOTER_INDENT_COLS * 2);
+
+    let padding = available_width.saturating_sub(status_width);
+    let color = if status.at_limit {
+        ratatui::style::Color::Red
+    } else {
+        ratatui::style::Color::Yellow
+    };
+
+    Line::from(vec![
+        " ".repeat(padding).into(),
+        Span::from(status.text).fg(color),
+    ])
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -386,7 +443,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     fn snapshot_footer(name: &str, props: FooterProps) {
-        let height = footer_height(props).max(1);
+        let height = footer_height(&props).max(1);
         let mut terminal = Terminal::new(TestBackend::new(80, height)).unwrap();
         terminal
             .draw(|f| {
@@ -407,6 +464,7 @@ mod tests {
                 use_shift_enter_hint: false,
                 is_task_running: false,
                 context_window_percent: None,
+                usage_status: None,
             },
         );
 
@@ -418,6 +476,7 @@ mod tests {
                 use_shift_enter_hint: true,
                 is_task_running: false,
                 context_window_percent: None,
+                usage_status: None,
             },
         );
 
@@ -429,6 +488,7 @@ mod tests {
                 use_shift_enter_hint: false,
                 is_task_running: false,
                 context_window_percent: None,
+                usage_status: None,
             },
         );
 
@@ -440,6 +500,7 @@ mod tests {
                 use_shift_enter_hint: false,
                 is_task_running: true,
                 context_window_percent: None,
+                usage_status: None,
             },
         );
 
@@ -451,6 +512,7 @@ mod tests {
                 use_shift_enter_hint: false,
                 is_task_running: false,
                 context_window_percent: None,
+                usage_status: None,
             },
         );
 
@@ -462,6 +524,7 @@ mod tests {
                 use_shift_enter_hint: false,
                 is_task_running: false,
                 context_window_percent: None,
+                usage_status: None,
             },
         );
 
@@ -473,6 +536,67 @@ mod tests {
                 use_shift_enter_hint: false,
                 is_task_running: true,
                 context_window_percent: Some(72),
+                usage_status: None,
+            },
+        );
+
+        snapshot_footer(
+            "footer_shortcuts_with_usage_status_yellow",
+            FooterProps {
+                mode: FooterMode::ShortcutPrompt,
+                esc_backtrack_hint: false,
+                use_shift_enter_hint: false,
+                is_task_running: false,
+                context_window_percent: None,
+                usage_status: Some(UsageStatusText {
+                    text: "85% of limit (resets in 30m)".to_string(),
+                    at_limit: false,
+                }),
+            },
+        );
+
+        snapshot_footer(
+            "footer_shortcuts_with_usage_status_red",
+            FooterProps {
+                mode: FooterMode::ShortcutPrompt,
+                esc_backtrack_hint: false,
+                use_shift_enter_hint: false,
+                is_task_running: false,
+                context_window_percent: None,
+                usage_status: Some(UsageStatusText {
+                    text: "limit reached (resets in 30m)".to_string(),
+                    at_limit: true,
+                }),
+            },
+        );
+
+        snapshot_footer(
+            "footer_empty_with_usage_status_yellow",
+            FooterProps {
+                mode: FooterMode::Empty,
+                esc_backtrack_hint: false,
+                use_shift_enter_hint: false,
+                is_task_running: false,
+                context_window_percent: None,
+                usage_status: Some(UsageStatusText {
+                    text: "95% of weekly limit (resets in 2h)".to_string(),
+                    at_limit: false,
+                }),
+            },
+        );
+
+        snapshot_footer(
+            "footer_empty_with_usage_status_red",
+            FooterProps {
+                mode: FooterMode::Empty,
+                esc_backtrack_hint: false,
+                use_shift_enter_hint: false,
+                is_task_running: false,
+                context_window_percent: None,
+                usage_status: Some(UsageStatusText {
+                    text: "weekly limit reached (resets in 2h)".to_string(),
+                    at_limit: true,
+                }),
             },
         );
     }

@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use crate::app_event_sender::AppEventSender;
 use crate::tui::FrameRequester;
+use crate::usage_status_bar::UsageStatusText;
 use bottom_pane_view::BottomPaneView;
 use codex_file_search::FileMatch;
 use crossterm::event::KeyCode;
@@ -69,6 +70,7 @@ pub(crate) struct BottomPane {
     /// Queued user messages to show under the status indicator.
     queued_user_messages: Vec<String>,
     context_window_percent: Option<u8>,
+    usage_status: Option<UsageStatusText>,
 }
 
 pub(crate) struct BottomPaneParams {
@@ -102,6 +104,7 @@ impl BottomPane {
             queued_user_messages: Vec::new(),
             esc_backtrack_hint: false,
             context_window_percent: None,
+            usage_status: None,
         }
     }
 
@@ -357,6 +360,16 @@ impl BottomPane {
 
         self.context_window_percent = percent;
         self.composer.set_context_window_percent(percent);
+        self.request_redraw();
+    }
+
+    pub(crate) fn set_usage_status(&mut self, status: Option<UsageStatusText>) {
+        if self.usage_status == status {
+            return;
+        }
+
+        self.usage_status = status.clone();
+        self.composer.set_usage_status(status);
         self.request_redraw();
     }
 

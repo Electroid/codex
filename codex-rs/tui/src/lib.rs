@@ -70,6 +70,7 @@ mod terminal_palette;
 mod text_formatting;
 mod tui;
 mod ui_consts;
+mod usage_status_bar;
 mod version;
 mod wrapping;
 

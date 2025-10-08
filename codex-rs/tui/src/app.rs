@@ -71,6 +71,8 @@ pub(crate) struct App {
 
     // Esc-backtracking state grouped
     pub(crate) backtrack: crate::app_backtrack::BacktrackState,
+
+    pub(crate) usage_status_bar: crate::usage_status_bar::UsageStatusBar,
 }
 
 impl App {
@@ -152,6 +154,7 @@ impl App {
             has_emitted_history_lines: false,
             commit_anim_running: Arc::new(AtomicBool::new(false)),
             backtrack: BacktrackState::default(),
+            usage_status_bar: crate::usage_status_bar::UsageStatusBar::new(),
         };
 
         let tui_events = tui.event_stream();
@@ -205,8 +208,9 @@ impl App {
                     tui.draw(
                         self.chat_widget.desired_height(tui.terminal.size()?.width),
                         |frame| {
-                            frame.render_widget_ref(&self.chat_widget, frame.area());
-                            if let Some((x, y)) = self.chat_widget.cursor_pos(frame.area()) {
+                            let area = frame.area();
+                            frame.render_widget_ref(&self.chat_widget, area);
+                            if let Some((x, y)) = self.chat_widget.cursor_pos(area) {
                                 frame.set_cursor_position((x, y));
                             }
                         },
@@ -400,6 +404,12 @@ impl App {
                     ));
                 }
             },
+            AppEvent::UpdateRateLimits(snapshot) => {
+                self.usage_status_bar.update_snapshot(snapshot);
+                let usage_text = self.usage_status_bar.get_footer_text();
+                self.chat_widget.set_usage_status(usage_text);
+                tui.frame_requester().schedule_frame();
+            }
         }
         Ok(true)
     }
@@ -437,7 +447,14 @@ impl App {
                 if self.chat_widget.is_normal_backtrack_mode()
                     && self.chat_widget.composer_is_empty()
                 {
-                    self.handle_backtrack_esc_key(tui);
+                    if self.usage_status_bar.should_show() {
+                        self.usage_status_bar.dismiss();
+                        let usage_text = self.usage_status_bar.get_footer_text();
+                        self.chat_widget.set_usage_status(usage_text);
+                        tui.frame_requester().schedule_frame();
+                    } else {
+                        self.handle_backtrack_esc_key(tui);
+                    }
                 } else {
                     self.chat_widget.handle_key_event(key_event);
                 }
@@ -520,6 +537,7 @@ mod tests {
             enhanced_keys_supported: false,
             commit_anim_running: Arc::new(AtomicBool::new(false)),
             backtrack: BacktrackState::default(),
+            usage_status_bar: crate::usage_status_bar::UsageStatusBar::new(),
         }
     }
 
