@@ -19,12 +19,14 @@ struct TestScenario {
     repo_root: PathBuf,
     file_in_repo_root: PathBuf,
     file_in_dot_git_dir: PathBuf,
+    file_in_dot_codex_dir: PathBuf,
 }
 
 struct TestExpectations {
     file_outside_repo_is_writable: bool,
     file_in_repo_root_is_writable: bool,
     file_in_dot_git_dir_is_writable: bool,
+    file_in_dot_codex_dir_is_writable: bool,
 }
 
 impl TestScenario {
@@ -60,6 +62,15 @@ impl TestScenario {
             self.file_in_dot_git_dir.exists(),
             expectations.file_in_dot_git_dir_is_writable
         );
+
+        assert_eq!(
+            touch(&self.file_in_dot_codex_dir, policy).await,
+            expectations.file_in_dot_codex_dir_is_writable
+        );
+        assert_eq!(
+            self.file_in_dot_codex_dir.exists(),
+            expectations.file_in_dot_codex_dir_is_writable
+        );
     }
 }
 
@@ -89,6 +100,7 @@ async fn if_parent_of_repo_is_writable_then_dot_git_folder_is_writable() {
                 file_outside_repo_is_writable: true,
                 file_in_repo_root_is_writable: true,
                 file_in_dot_git_dir_is_writable: true,
+                file_in_dot_codex_dir_is_writable: true,
             },
         )
         .await;
@@ -115,6 +127,7 @@ async fn if_git_repo_is_writable_root_then_dot_git_folder_is_read_only() {
                 file_outside_repo_is_writable: false,
                 file_in_repo_root_is_writable: true,
                 file_in_dot_git_dir_is_writable: false,
+                file_in_dot_codex_dir_is_writable: false,
             },
         )
         .await;
@@ -135,6 +148,7 @@ async fn danger_full_access_allows_all_writes() {
                 file_outside_repo_is_writable: true,
                 file_in_repo_root_is_writable: true,
                 file_in_dot_git_dir_is_writable: true,
+                file_in_dot_codex_dir_is_writable: true,
             },
         )
         .await;
@@ -154,6 +168,7 @@ async fn read_only_forbids_all_writes() {
                 file_outside_repo_is_writable: false,
                 file_in_repo_root_is_writable: false,
                 file_in_dot_git_dir_is_writable: false,
+                file_in_dot_codex_dir_is_writable: false,
             },
         )
         .await;
@@ -208,9 +223,11 @@ fn create_test_scenario(tmp: &TempDir) -> TestScenario {
     let repo_parent = tmp.path().to_path_buf();
     let repo_root = repo_parent.join("repo");
     let dot_git_dir = repo_root.join(".git");
+    let dot_codex_dir = repo_root.join(".codex");
 
     std::fs::create_dir(&repo_root).expect("should be able to create repo root");
     std::fs::create_dir(&dot_git_dir).expect("should be able to create .git dir");
+    std::fs::create_dir(&dot_codex_dir).expect("should be able to create .codex dir");
 
     TestScenario {
         file_outside_repo: repo_parent.join("outside.txt"),
@@ -218,6 +235,7 @@ fn create_test_scenario(tmp: &TempDir) -> TestScenario {
         file_in_repo_root: repo_root.join("repo_file.txt"),
         repo_root,
         file_in_dot_git_dir: dot_git_dir.join("dot_git_file.txt"),
+        file_in_dot_codex_dir: dot_codex_dir.join("config.toml"),
     }
 }
 

@@ -16,6 +16,7 @@ use codex_ansi_escape::ansi_escape_line;
 use codex_core::AuthManager;
 use codex_core::ConversationManager;
 use codex_core::config::Config;
+use codex_core::config::find_state_directory;
 use codex_core::config::persist_model_selection;
 use codex_core::model_family::find_family_for_model;
 use codex_core::protocol::SessionSource;
@@ -329,9 +330,9 @@ impl App {
             }
             AppEvent::PersistModelSelection { model, effort } => {
                 let profile = self.active_profile.as_deref();
-                match persist_model_selection(&self.config.codex_home, profile, &model, effort)
-                    .await
-                {
+                let state_dir =
+                    find_state_directory().unwrap_or_else(|_| self.config.codex_home.clone());
+                match persist_model_selection(&state_dir, profile, &model, effort).await {
                     Ok(()) => {
                         let effort_label = effort
                             .map(|eff| format!(" with {eff} reasoning"))

@@ -372,10 +372,20 @@ impl SandboxPolicy {
                     .into_iter()
                     .map(|writable_root| {
                         let mut subpaths = Vec::new();
+
+                        // Keep .git directory read-only to prevent accidental modification
                         let top_level_git = writable_root.join(".git");
                         if top_level_git.is_dir() {
                             subpaths.push(top_level_git);
                         }
+
+                        // Keep .codex directory read-only to prevent accidental modification
+                        // of project configuration
+                        let top_level_codex = writable_root.join(".codex");
+                        if top_level_codex.is_dir() {
+                            subpaths.push(top_level_codex);
+                        }
+
                         WritableRoot {
                             root: writable_root,
                             read_only_subpaths: subpaths,

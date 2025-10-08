@@ -11,9 +11,12 @@ use toml::Value as TomlValue;
 #[cfg(unix)]
 const CODEX_MANAGED_CONFIG_SYSTEM_PATH: &str = "/etc/codex/managed_config.toml";
 
+const CONFIG_LOCAL_TOML_FILE: &str = "config.local.toml";
+
 #[derive(Debug)]
 pub(crate) struct LoadedConfigLayers {
     pub base: TomlValue,
+    pub local: Option<TomlValue>,
     pub managed_config: Option<TomlValue>,
     pub managed_preferences: Option<TomlValue>,
 }
@@ -34,6 +37,11 @@ pub(crate) struct LoaderOverrides {
 //                    |
 //        +-------------------------+
 //        |  managed_config.toml   |
+//        +-------------------------+
+//                    ^
+//                    |
+//        +-------------------------+
+//        | config.local.toml       |
 //        +-------------------------+
 //                    ^
 //                    |
@@ -85,7 +93,10 @@ async fn load_config_layers_internal(
         managed_config_path.unwrap_or_else(|| managed_config_default_path(codex_home));
 
     let user_config_path = codex_home.join(CONFIG_TOML_FILE);
+    let user_config_local_path = codex_home.join(CONFIG_LOCAL_TOML_FILE);
+
     let user_config = read_config_from_path(&user_config_path, true).await?;
+    let user_config_local = read_config_from_path(&user_config_local_path, false).await?;
     let managed_config = read_config_from_path(&managed_config_path, false).await?;
 
     #[cfg(target_os = "macos")]
@@ -97,6 +108,7 @@ async fn load_config_layers_internal(
 
     Ok(LoadedConfigLayers {
         base: user_config.unwrap_or_else(default_empty_table),
+        local: user_config_local,
         managed_config,
         managed_preferences,
     })
@@ -106,9 +118,20 @@ async fn read_config_from_path(
     path: &Path,
     log_missing_as_info: bool,
 ) -> io::Result<Option<TomlValue>> {
+    use crate::config::validate_project_trust_paths;
+
     match fs::read_to_string(path).await {
         Ok(contents) => match toml::from_str::<TomlValue>(&contents) {
-            Ok(value) => Ok(Some(value)),
+            Ok(value) => {
+                if let Err(e) = validate_project_trust_paths(path, &value) {
+                    tracing::error!("Failed to validate trust paths in {}: {e}", path.display());
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        format!("trust path validation failed: {e}"),
+                    ));
+                }
+                Ok(Some(value))
+            }
             Err(err) => {
                 tracing::error!("Failed to parse {}: {err}", path.display());
                 Err(io::Error::new(io::ErrorKind::InvalidData, err))
@@ -162,11 +185,15 @@ fn managed_config_default_path(codex_home: &Path) -> PathBuf {
 fn apply_managed_layers(layers: LoadedConfigLayers) -> TomlValue {
     let LoadedConfigLayers {
         mut base,
+        local,
         managed_config,
         managed_preferences,
     } = layers;
 
-    for overlay in [managed_config, managed_preferences].into_iter().flatten() {
+    for overlay in [local, managed_config, managed_preferences]
+        .into_iter()
+        .flatten()
+    {
         merge_toml_values(&mut base, &overlay);
     }
 

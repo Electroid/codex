@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use codex_core::config::find_state_directory;
 use codex_core::config::set_windows_wsl_setup_acknowledged;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
@@ -54,7 +55,8 @@ impl WindowsSetupWidget {
 
     fn handle_continue(&mut self) {
         self.highlighted = WindowsSetupSelection::Continue;
-        match set_windows_wsl_setup_acknowledged(&self.codex_home, true) {
+        let state_dir = find_state_directory().unwrap_or_else(|_| self.codex_home.clone());
+        match set_windows_wsl_setup_acknowledged(&state_dir, true) {
             Ok(()) => {
                 self.selection = Some(WindowsSetupSelection::Continue);
                 self.exit_requested = false;
