@@ -134,6 +134,8 @@ pub struct Config {
     /// and turn completions when not focused.
     pub tui_notifications: Notifications,
 
+    pub tui: Tui,
+
     /// The directory that should be treated as the current working directory
     /// for the session. All relative paths inside the business-logic layer are
     /// resolved against this path.
@@ -1132,6 +1134,7 @@ impl Config {
                 .as_ref()
                 .map(|t| t.notifications.clone())
                 .unwrap_or_default(),
+            tui: cfg.tui.unwrap_or_default(),
             otel: {
                 let t: OtelConfigToml = cfg.otel.unwrap_or_default();
                 let log_user_prompt = t.log_user_prompt.unwrap_or(false);
@@ -1921,6 +1924,7 @@ model_verbosity = "high"
                 windows_wsl_setup_acknowledged: false,
                 disable_paste_burst: false,
                 tui_notifications: Default::default(),
+                tui: Tui::default(),
                 otel: OtelConfig::default(),
             },
             o3_profile_config
@@ -1983,6 +1987,7 @@ model_verbosity = "high"
             windows_wsl_setup_acknowledged: false,
             disable_paste_burst: false,
             tui_notifications: Default::default(),
+            tui: Tui::default(),
             otel: OtelConfig::default(),
         };
 
@@ -2060,6 +2065,7 @@ model_verbosity = "high"
             windows_wsl_setup_acknowledged: false,
             disable_paste_burst: false,
             tui_notifications: Default::default(),
+            tui: Tui::default(),
             otel: OtelConfig::default(),
         };
 
@@ -2123,6 +2129,7 @@ model_verbosity = "high"
             windows_wsl_setup_acknowledged: false,
             disable_paste_burst: false,
             tui_notifications: Default::default(),
+            tui: Tui::default(),
             otel: OtelConfig::default(),
         };
 
@@ -2236,7 +2243,10 @@ mod notifications_tests {
 
     #[derive(Deserialize, Debug, PartialEq)]
     struct TuiTomlTest {
+        #[serde(default)]
         notifications: Notifications,
+        #[serde(default)]
+        max_width: Option<u16>,
     }
 
     #[derive(Deserialize, Debug, PartialEq)]
@@ -2266,5 +2276,25 @@ mod notifications_tests {
             parsed.tui.notifications,
             Notifications::Custom(ref v) if v == &vec!["foo".to_string()]
         );
+    }
+
+    #[test]
+    fn test_tui_max_width_set() {
+        let toml = r#"
+            [tui]
+            max_width = 80
+        "#;
+        let parsed: RootTomlTest = toml::from_str(toml).expect("deserialize max_width=80");
+        assert_eq!(parsed.tui.max_width, Some(80));
+    }
+
+    #[test]
+    fn test_tui_max_width_unset() {
+        let toml = r#"
+            [tui]
+            notifications = true
+        "#;
+        let parsed: RootTomlTest = toml::from_str(toml).expect("deserialize with no max_width");
+        assert_eq!(parsed.tui.max_width, None);
     }
 }

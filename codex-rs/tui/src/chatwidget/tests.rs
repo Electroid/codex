@@ -2344,3 +2344,101 @@ printf 'fenced within fenced\n'
 
     assert_snapshot!(term.backend().vt100().screen().contents());
 }
+
+#[test]
+fn max_width_constrains_rendering() {
+    use codex_core::config_types::Tui;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let (mut chat, rx, _op_rx) = make_chatwidget_manual();
+    chat.config.tui = Tui {
+        notifications: Default::default(),
+        max_width: Some(50),
+    };
+
+    chat.handle_codex_event(Event {
+        id: "1".into(),
+        msg: EventMsg::AgentMessage(AgentMessageEvent {
+            message: "This is a very long line that will wrap differently when constrained to fifty characters versus the full one hundred twenty character terminal width.".to_string(),
+        }),
+    });
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 10)).expect("terminal");
+    terminal
+        .draw(|f| f.render_widget_ref(&chat, f.area()))
+        .expect("draw");
+
+    drop(chat);
+    drop(rx);
+
+    assert_snapshot!("max_width_50_terminal_120", terminal.backend());
+}
+
+#[test]
+fn layout_height_respects_content_width() {
+    use crate::history_cell::HistoryCell;
+    use ratatui::layout::Rect;
+    use ratatui::text::Line;
+
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual();
+
+    let long_text = "This is a very long line that will wrap at width 60 but not at width 120";
+    let cell: Box<dyn HistoryCell> = Box::new(crate::history_cell::AgentMessageCell::new(
+        vec![Line::from(long_text)],
+        true,
+    ));
+    chat.active_cell = Some(cell);
+
+    let area = Rect::new(0, 0, 120, 20);
+
+    let layout_120 = chat.layout_areas(area, 120);
+    let layout_60 = chat.layout_areas(area, 60);
+
+    assert!(
+        layout_60[1].height >= layout_120[1].height,
+        "Layout at width 60 should allocate at least as much height as width 120 due to wrapping. Got {}px at 60 vs {}px at 120",
+        layout_60[1].height,
+        layout_120[1].height
+    );
+}
+
+#[test]
+fn cursor_pos_respects_max_width() {
+    use codex_core::config_types::Tui;
+    use ratatui::layout::Rect;
+
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual();
+    chat.config.tui = Tui {
+        notifications: Default::default(),
+        max_width: Some(60),
+    };
+
+    let area = Rect::new(0, 0, 120, 20);
+    let cursor = chat.cursor_pos(area);
+
+    assert!(cursor.is_some());
+}
+
+#[test]
+fn last_rendered_width_stores_effective_width() {
+    use codex_core::config_types::Tui;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let (mut chat, rx, _op_rx) = make_chatwidget_manual();
+    chat.config.tui = Tui {
+        notifications: Default::default(),
+        max_width: Some(60),
+    };
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 10)).expect("terminal");
+    terminal
+        .draw(|f| f.render_widget_ref(&chat, f.area()))
+        .expect("draw");
+
+    assert_eq!(chat.last_rendered_width.get(), Some(60));
+
+    drop(chat);
+    drop(rx);
+}
