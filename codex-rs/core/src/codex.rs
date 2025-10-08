@@ -254,6 +254,7 @@ pub(crate) struct TurnContext {
     /// the model as well as sandbox policies are resolved against this path
     /// instead of `std::env::current_dir()`.
     pub(crate) cwd: PathBuf,
+    pub(crate) workspaces: Vec<PathBuf>,
     pub(crate) base_instructions: Option<String>,
     pub(crate) user_instructions: Option<String>,
     pub(crate) approval_policy: AskForApproval,
@@ -459,6 +460,7 @@ impl Session {
             cwd,
             is_review_mode: false,
             final_output_json_schema: None,
+            workspaces: config.workspaces.clone(),
         };
         let services = SessionServices {
             mcp_connection_manager,
@@ -722,8 +724,14 @@ impl Session {
         if let Some(user_instructions) = turn_context.user_instructions.as_deref() {
             items.push(UserInstructions::new(user_instructions.to_string()).into());
         }
+        let workspaces = if turn_context.workspaces.is_empty() {
+            None
+        } else {
+            Some(turn_context.workspaces.clone())
+        };
         items.push(ResponseItem::from(EnvironmentContext::new(
             Some(turn_context.cwd.clone()),
+            workspaces,
             Some(turn_context.approval_policy),
             Some(turn_context.sandbox_policy.clone()),
             Some(self.user_shell().clone()),
@@ -1212,6 +1220,7 @@ async fn submission_loop(
                     cwd: new_cwd.clone(),
                     is_review_mode: false,
                     final_output_json_schema: None,
+                    workspaces: prev.workspaces.clone(),
                 };
 
                 // Install the new persistent context for subsequent tasks/turns.
@@ -1221,9 +1230,9 @@ async fn submission_loop(
                 if cwd.is_some() || approval_policy.is_some() || sandbox_policy.is_some() {
                     sess.record_conversation_items(&[ResponseItem::from(EnvironmentContext::new(
                         cwd,
+                        None,
                         approval_policy,
                         sandbox_policy,
-                        // Shell is not configurable from turn to turn
                         None,
                     ))])
                     .await;
@@ -1312,6 +1321,7 @@ async fn submission_loop(
                         cwd,
                         is_review_mode: false,
                         final_output_json_schema,
+                        workspaces: config.workspaces.clone(),
                     };
 
                     // if the environment context has changed, record it in the conversation history
@@ -1582,6 +1592,7 @@ async fn spawn_review_thread(
         cwd: parent_turn_context.cwd.clone(),
         is_review_mode: true,
         final_output_json_schema: None,
+        workspaces: parent_turn_context.workspaces.clone(),
     };
 
     // Seed the child task with the review prompt as the initial user message.
@@ -2758,6 +2769,7 @@ mod tests {
             tools_config,
             is_review_mode: false,
             final_output_json_schema: None,
+            workspaces: config.workspaces.clone(),
         };
         let services = SessionServices {
             mcp_connection_manager: McpConnectionManager::default(),
@@ -2831,6 +2843,7 @@ mod tests {
             tools_config,
             is_review_mode: false,
             final_output_json_schema: None,
+            workspaces: config.workspaces.clone(),
         });
         let services = SessionServices {
             mcp_connection_manager: McpConnectionManager::default(),

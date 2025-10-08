@@ -899,18 +899,21 @@ impl ChatWidget {
         let placeholder = EXAMPLE_PROMPTS[rng.random_range(0..EXAMPLE_PROMPTS.len())].to_string();
         let codex_op_tx = spawn_agent(config.clone(), app_event_tx.clone(), conversation_manager);
 
+        let mut bottom_pane = BottomPane::new(BottomPaneParams {
+            frame_requester: frame_requester.clone(),
+            app_event_tx: app_event_tx.clone(),
+            has_input_focus: true,
+            enhanced_keys_supported,
+            placeholder_text: placeholder,
+            disable_paste_burst: config.disable_paste_burst,
+        });
+        bottom_pane.set_workspaces(config.workspaces.clone(), config.cwd.clone());
+
         Self {
             app_event_tx: app_event_tx.clone(),
             frame_requester: frame_requester.clone(),
             codex_op_tx,
-            bottom_pane: BottomPane::new(BottomPaneParams {
-                frame_requester,
-                app_event_tx,
-                has_input_focus: true,
-                enhanced_keys_supported,
-                placeholder_text: placeholder,
-                disable_paste_burst: config.disable_paste_burst,
-            }),
+            bottom_pane,
             active_cell: None,
             config: config.clone(),
             auth_manager,
@@ -962,18 +965,21 @@ impl ChatWidget {
         let codex_op_tx =
             spawn_agent_from_existing(conversation, session_configured, app_event_tx.clone());
 
+        let mut bottom_pane = BottomPane::new(BottomPaneParams {
+            frame_requester: frame_requester.clone(),
+            app_event_tx: app_event_tx.clone(),
+            has_input_focus: true,
+            enhanced_keys_supported,
+            placeholder_text: placeholder,
+            disable_paste_burst: config.disable_paste_burst,
+        });
+        bottom_pane.set_workspaces(config.workspaces.clone(), config.cwd.clone());
+
         Self {
             app_event_tx: app_event_tx.clone(),
             frame_requester: frame_requester.clone(),
             codex_op_tx,
-            bottom_pane: BottomPane::new(BottomPaneParams {
-                frame_requester,
-                app_event_tx,
-                has_input_focus: true,
-                enhanced_keys_supported,
-                placeholder_text: placeholder,
-                disable_paste_burst: config.disable_paste_burst,
-            }),
+            bottom_pane,
             active_cell: None,
             config: config.clone(),
             auth_manager,
@@ -1161,6 +1167,12 @@ impl ChatWidget {
             }
             SlashCommand::Mcp => {
                 self.add_mcp_output();
+            }
+            SlashCommand::AddWorkspace => {
+                self.handle_add_workspace_command();
+            }
+            SlashCommand::RemoveWorkspace => {
+                self.handle_remove_workspace_command();
             }
             #[cfg(debug_assertions)]
             SlashCommand::TestApproval => {
@@ -1846,6 +1858,188 @@ impl ChatWidget {
             self.add_to_history(history_cell::empty_mcp_output());
         } else {
             self.submit_op(Op::ListMcpTools);
+        }
+    }
+
+    fn format_path_relative(&self, path: &PathBuf) -> String {
+        if let Ok(rel) = path.strip_prefix(&self.config.cwd) {
+            if !rel.as_os_str().is_empty() {
+                return format!("./{}", rel.display());
+            }
+        }
+
+        if let Some(home) = std::env::var_os("HOME") {
+            let home_path = PathBuf::from(home);
+            if let Ok(rel) = path.strip_prefix(&home_path) {
+                if rel.as_os_str().is_empty() {
+                    return "~".to_string();
+                } else {
+                    return format!("~/{}", rel.display());
+                }
+            }
+        }
+
+        path.display().to_string()
+    }
+
+    fn handle_add_workspace_command(&mut self) {
+        let text = self.bottom_pane.composer_text();
+        let args = text.strip_prefix("/add-workspace").unwrap_or("").trim();
+
+        // Clear the composer now that we've read the command
+        self.bottom_pane.set_composer_text(String::new());
+
+        if args.is_empty() {
+            self.add_to_history(history_cell::new_error_event(
+                "Usage: /add-workspace <path>".to_string(),
+            ));
+            self.request_redraw();
+            return;
+        }
+        let dir_path = PathBuf::from(args);
+        let resolved = if dir_path.is_absolute() {
+            dir_path
+        } else {
+            let mut base = self.config.cwd.clone();
+            base.push(dir_path);
+            base
+        };
+        match resolved.canonicalize() {
+            Ok(canonical) if canonical.is_dir() => {
+                // Check if this is the cwd itself
+                if canonical == self.config.cwd {
+                    self.add_to_history(history_cell::new_error_event(
+                        "Cannot add current working directory as workspace (it's already the primary workspace)".to_string(),
+                    ));
+                    self.request_redraw();
+                    return;
+                }
+
+                // Check if already in workspaces
+                if self.config.workspaces.contains(&canonical) {
+                    let display_path = self.format_path_relative(&canonical);
+                    self.add_to_history(history_cell::new_error_event(format!(
+                        "Workspace already added: {}",
+                        display_path
+                    )));
+                    self.request_redraw();
+                    return;
+                }
+
+                let display_path = self.format_path_relative(&canonical);
+                self.config.workspaces.push(canonical.clone());
+                self.app_event_tx
+                    .send(AppEvent::AddDirectory(canonical.clone()));
+                self.bottom_pane
+                    .set_workspaces(self.config.workspaces.clone(), self.config.cwd.clone());
+                self.add_to_history(history_cell::new_info_event(
+                    format!("Added workspace: {}", display_path),
+                    None,
+                ));
+                self.request_redraw();
+            }
+            Ok(canonical) => {
+                let display_path = self.format_path_relative(&canonical);
+                self.add_to_history(history_cell::new_error_event(format!(
+                    "Not a directory: {}",
+                    display_path
+                )));
+                self.request_redraw();
+            }
+            Err(e) => {
+                let display_path = self.format_path_relative(&resolved);
+                let msg = if e.kind() == std::io::ErrorKind::NotFound {
+                    format!("Directory does not exist: {}", display_path)
+                } else {
+                    format!("Failed to resolve directory {}: {}", display_path, e)
+                };
+                self.add_to_history(history_cell::new_error_event(msg));
+                self.request_redraw();
+            }
+        }
+    }
+
+    fn handle_remove_workspace_command(&mut self) {
+        let text = self.bottom_pane.composer_text();
+        let args = text.strip_prefix("/remove-workspace").unwrap_or("").trim();
+        self.bottom_pane.set_composer_text(String::new());
+        if args.is_empty() {
+            let dirs = self.config.workspaces.clone();
+            if dirs.is_empty() {
+                self.add_to_history(history_cell::new_info_event(
+                    "No additional workspaces configured.".to_string(),
+                    None,
+                ));
+            } else {
+                let mut message = String::from("Workspaces:\n");
+                for dir in dirs {
+                    let display_path = self.format_path_relative(&dir);
+                    message.push_str(&format!("  {}\n", display_path));
+                }
+                self.add_to_history(history_cell::new_info_event(message, None));
+            }
+            self.request_redraw();
+            return;
+        }
+        let dir_path = PathBuf::from(args);
+        let resolved = if dir_path.is_absolute() {
+            dir_path
+        } else {
+            let mut base = self.config.cwd.clone();
+            base.push(dir_path);
+            base
+        };
+        match resolved.canonicalize() {
+            Ok(canonical) => {
+                // Check if this is the cwd itself
+                if canonical == self.config.cwd {
+                    self.add_to_history(history_cell::new_error_event(
+                        "Cannot remove current working directory (it's the primary workspace)"
+                            .to_string(),
+                    ));
+                    self.request_redraw();
+                    return;
+                }
+
+                // Check if cwd is inside this directory (would break the workspace)
+                if self.config.cwd.starts_with(&canonical) {
+                    self.add_to_history(history_cell::new_error_event(
+                        "Cannot remove workspace containing current working directory".to_string(),
+                    ));
+                    self.request_redraw();
+                    return;
+                }
+
+                if let Some(pos) = self.config.workspaces.iter().position(|d| d == &canonical) {
+                    let display_path = self.format_path_relative(&canonical);
+                    self.config.workspaces.remove(pos);
+                    self.app_event_tx
+                        .send(AppEvent::RemoveDirectory(canonical.clone()));
+                    self.bottom_pane
+                        .set_workspaces(self.config.workspaces.clone(), self.config.cwd.clone());
+                    self.add_to_history(history_cell::new_info_event(
+                        format!("Removed workspace: {}", display_path),
+                        None,
+                    ));
+                } else {
+                    let display_path = self.format_path_relative(&canonical);
+                    self.add_to_history(history_cell::new_error_event(format!(
+                        "Workspace not found: {}",
+                        display_path
+                    )));
+                }
+                self.request_redraw();
+            }
+            Err(e) => {
+                let display_path = self.format_path_relative(&resolved);
+                let msg = if e.kind() == std::io::ErrorKind::NotFound {
+                    format!("Directory does not exist: {}", display_path)
+                } else {
+                    format!("Failed to resolve directory {}: {}", display_path, e)
+                };
+                self.add_to_history(history_cell::new_error_event(msg));
+                self.request_redraw();
+            }
         }
     }
 

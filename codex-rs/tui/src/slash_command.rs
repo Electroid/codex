@@ -23,6 +23,8 @@ pub enum SlashCommand {
     Mention,
     Status,
     Mcp,
+    AddWorkspace,
+    RemoveWorkspace,
     Logout,
     Quit,
     #[cfg(debug_assertions)]
@@ -45,6 +47,8 @@ impl SlashCommand {
             SlashCommand::Model => "choose what model and reasoning effort to use",
             SlashCommand::Approvals => "choose what Codex can do without approval",
             SlashCommand::Mcp => "list configured MCP tools",
+            SlashCommand::AddWorkspace => "add a workspace directory",
+            SlashCommand::RemoveWorkspace => "remove a workspace directory",
             SlashCommand::Logout => "log out of Codex",
             #[cfg(debug_assertions)]
             SlashCommand::TestApproval => "test approval request",
@@ -55,6 +59,15 @@ impl SlashCommand {
     /// existing code that expects a method named `command()`.
     pub fn command(self) -> &'static str {
         self.into()
+    }
+
+    /// Returns parameter hint for commands that take arguments.
+    pub fn parameter_hint(self) -> Option<&'static str> {
+        match self {
+            SlashCommand::AddWorkspace => Some("<path>"),
+            SlashCommand::RemoveWorkspace => Some("<path>"),
+            _ => None,
+        }
     }
 
     /// Whether this command can be run while a task is in progress.
@@ -72,6 +85,8 @@ impl SlashCommand {
             | SlashCommand::Mention
             | SlashCommand::Status
             | SlashCommand::Mcp
+            | SlashCommand::AddWorkspace
+            | SlashCommand::RemoveWorkspace
             | SlashCommand::Quit => true,
 
             #[cfg(debug_assertions)]

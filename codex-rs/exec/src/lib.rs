@@ -173,6 +173,7 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         approval_policy: Some(AskForApproval::Never),
         sandbox_mode,
         cwd: cwd.map(|p| p.canonicalize().unwrap_or(p)),
+        workspaces: None,
         model_provider,
         codex_linux_sandbox_exe,
         base_instructions: None,

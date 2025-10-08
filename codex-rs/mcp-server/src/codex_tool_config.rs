@@ -154,6 +154,7 @@ impl CodexToolCallParam {
             review_model: None,
             config_profile: profile,
             cwd: cwd.map(PathBuf::from),
+            workspaces: None,
             approval_policy: approval_policy.map(Into::into),
             sandbox_mode: sandbox.map(Into::into),
             model_provider: None,

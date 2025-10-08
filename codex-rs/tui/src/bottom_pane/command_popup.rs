@@ -162,7 +162,12 @@ impl CommandPopup {
             .map(|(item, indices, _)| {
                 let (name, description) = match item {
                     CommandItem::Builtin(cmd) => {
-                        (format!("/{}", cmd.command()), cmd.description().to_string())
+                        let name = if let Some(hint) = cmd.parameter_hint() {
+                            format!("/{} {}", cmd.command(), hint)
+                        } else {
+                            format!("/{}", cmd.command())
+                        };
+                        (name, cmd.description().to_string())
                     }
                     CommandItem::UserPrompt(i) => (
                         format!("/{PROMPTS_CMD_PREFIX}:{}", self.prompts[i].name),

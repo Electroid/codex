@@ -45,13 +45,16 @@ pub(crate) struct FileSearchManager {
     /// Unified state guarded by one mutex.
     state: Arc<Mutex<SearchState>>,
 
-    search_dir: PathBuf,
+    search_dirs: Arc<Mutex<Vec<PathBuf>>>,
     app_tx: AppEventSender,
 }
 
 struct SearchState {
     /// Latest query typed by user (updated every keystroke).
     latest_query: String,
+
+    /// File type filter for the latest query.
+    file_type_filter: codex_file_search::FileTypeFilter,
 
     /// true if a search is currently scheduled.
     is_search_scheduled: bool,
@@ -70,27 +73,47 @@ impl FileSearchManager {
         Self {
             state: Arc::new(Mutex::new(SearchState {
                 latest_query: String::new(),
+                file_type_filter: codex_file_search::FileTypeFilter::FilesOnly,
                 is_search_scheduled: false,
                 active_search: None,
             })),
-            search_dir,
+            search_dirs: Arc::new(Mutex::new(vec![search_dir])),
             app_tx: tx,
         }
     }
 
+    pub fn add_directory(&self, dir: PathBuf) {
+        #[expect(clippy::unwrap_used)]
+        let mut dirs = self.search_dirs.lock().unwrap();
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+
+    pub fn remove_directory(&self, dir: &PathBuf) {
+        #[expect(clippy::unwrap_used)]
+        let mut dirs = self.search_dirs.lock().unwrap();
+        dirs.retain(|d| d != dir);
+    }
+
     /// Call whenever the user edits the `@` token.
-    pub fn on_user_query(&self, query: String) {
+    pub fn on_user_query(
+        &self,
+        query: String,
+        file_type_filter: codex_file_search::FileTypeFilter,
+    ) {
         {
             #[expect(clippy::unwrap_used)]
             let mut st = self.state.lock().unwrap();
-            if query == st.latest_query {
+            if query == st.latest_query && file_type_filter == st.file_type_filter {
                 // No change, nothing to do.
                 return;
             }
 
-            // Update latest query.
+            // Update latest query and filter.
             st.latest_query.clear();
             st.latest_query.push_str(&query);
+            st.file_type_filter = file_type_filter;
 
             // If there is an in-flight search that is definitely obsolete,
             // cancel it now.
@@ -115,7 +138,7 @@ impl FileSearchManager {
         // dropping the lock. This means we are the only thread that can spawn a
         // debounce timer.
         let state = self.state.clone();
-        let search_dir = self.search_dir.clone();
+        let search_dirs = self.search_dirs.clone();
         let tx_clone = self.app_tx.clone();
         thread::spawn(move || {
             // Always do a minimum debounce, but then poll until the
@@ -133,57 +156,76 @@ impl FileSearchManager {
             // latest query.
             let cancellation_token = Arc::new(AtomicBool::new(false));
             let token = cancellation_token.clone();
-            let query = {
+            let (query, file_type_filter) = {
                 #[expect(clippy::unwrap_used)]
                 let mut st = state.lock().unwrap();
                 let query = st.latest_query.clone();
+                let filter = st.file_type_filter;
                 st.is_search_scheduled = false;
                 st.active_search = Some(ActiveSearch {
                     query: query.clone(),
                     cancellation_token: token,
                 });
-                query
+                (query, filter)
             };
 
             FileSearchManager::spawn_file_search(
                 query,
-                search_dir,
+                search_dirs,
                 tx_clone,
                 cancellation_token,
                 state,
+                file_type_filter,
             );
         });
     }
 
     fn spawn_file_search(
         query: String,
-        search_dir: PathBuf,
+        search_dirs: Arc<Mutex<Vec<PathBuf>>>,
         tx: AppEventSender,
         cancellation_token: Arc<AtomicBool>,
         search_state: Arc<Mutex<SearchState>>,
+        file_type_filter: codex_file_search::FileTypeFilter,
     ) {
         let compute_indices = true;
         std::thread::spawn(move || {
-            let matches = file_search::run(
-                &query,
-                MAX_FILE_SEARCH_RESULTS,
-                &search_dir,
-                Vec::new(),
-                NUM_FILE_SEARCH_THREADS,
-                cancellation_token.clone(),
-                compute_indices,
-            )
-            .map(|res| res.matches)
-            .unwrap_or_default();
+            #[expect(clippy::unwrap_used)]
+            let dirs = search_dirs.lock().unwrap().clone();
+
+            let mut all_matches = Vec::new();
+            for search_dir in dirs {
+                if cancellation_token.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                let dir_matches = file_search::run(
+                    &query,
+                    MAX_FILE_SEARCH_RESULTS,
+                    &search_dir,
+                    Vec::new(),
+                    NUM_FILE_SEARCH_THREADS,
+                    cancellation_token.clone(),
+                    compute_indices,
+                    file_type_filter,
+                )
+                .map(|res| res.matches)
+                .unwrap_or_default();
+
+                all_matches.extend(dir_matches);
+            }
+
+            all_matches.sort_by(|a, b| b.score.cmp(&a.score));
+            all_matches.truncate(MAX_FILE_SEARCH_RESULTS.get());
 
             let is_cancelled = cancellation_token.load(Ordering::Relaxed);
             if !is_cancelled {
-                tx.send(AppEvent::FileSearchResult { query, matches });
+                tx.send(AppEvent::FileSearchResult {
+                    query,
+                    matches: all_matches,
+                });
             }
 
-            // Reset the active search state. Do a pointer comparison to verify
-            // that we are clearing the ActiveSearch that corresponds to the
-            // cancellation token we were given.
             {
                 #[expect(clippy::unwrap_used)]
                 let mut st = search_state.lock().unwrap();

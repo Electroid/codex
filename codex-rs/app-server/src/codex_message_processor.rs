@@ -1341,6 +1341,7 @@ async fn derive_config_from_params(
         review_model: None,
         config_profile: profile,
         cwd: cwd.map(PathBuf::from),
+        workspaces: None,
         approval_policy,
         sandbox_mode,
         model_provider: None,
