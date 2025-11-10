@@ -125,6 +125,20 @@ async fn test_writable_root() {
 }
 
 #[tokio::test]
+async fn sandbox_allows_unix_socketpair_send() {
+    run_cmd(
+        &[
+            "python3",
+            "-c",
+            "import socket; s1,s2=socket.socketpair(); s1.send(b'x'); assert s2.recv(1)==b'x'",
+        ],
+        &[],
+        SHORT_TIMEOUT_MS,
+    )
+    .await;
+}
+
+#[tokio::test]
 #[should_panic(expected = "Sandbox(Timeout")]
 async fn test_timeout() {
     run_cmd(&["sleep", "2"], &[], 50).await;
@@ -235,4 +249,14 @@ async fn sandbox_blocks_dev_tcp_redirection() {
     // Fallback generic socket attempt using /bin/sh with bash‑style /dev/tcp.  Not
     // all images ship bash, so we guard against 127 as well.
     assert_network_blocked(&["bash", "-c", "echo hi > /dev/tcp/127.0.0.1/80"]).await;
+}
+
+#[tokio::test]
+async fn sandbox_blocks_python_remote_connect() {
+    assert_network_blocked(&[
+        "python3",
+        "-c",
+        "import socket; socket.create_connection(('example.com', 80), 1)",
+    ])
+    .await;
 }

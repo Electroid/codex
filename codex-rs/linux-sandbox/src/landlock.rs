@@ -101,7 +101,18 @@ fn install_network_seccomp_filter_on_current_thread() -> std::result::Result<(),
     deny_syscall(libc::SYS_getpeername);
     deny_syscall(libc::SYS_getsockname);
     deny_syscall(libc::SYS_shutdown);
-    deny_syscall(libc::SYS_sendto);
+
+    // Deny sendto and send, which can use sendto with dest NULL, when a remote
+    // address is provided. Allows AF_UNIX sockets but denies remote sockets.
+    // Example: https://github.com/openai/codex/issues/6352
+    let unix_only_sendto_rule = SeccompRule::new(vec![SeccompCondition::new(
+        4, // dest_addr argument must be non-null to be a remote address
+        SeccompCmpArgLen::Qword,
+        SeccompCmpOp::Ne,
+        0, // NULL address
+    )?])?;
+    rules.insert(libc::SYS_sendto, vec![unix_only_sendto_rule]);
+
     deny_syscall(libc::SYS_sendmsg);
     deny_syscall(libc::SYS_sendmmsg);
     // NOTE: allowing recvfrom allows some tools like: `cargo clippy` to run
