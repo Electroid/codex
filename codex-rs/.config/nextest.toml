@@ -1,0 +1,8 @@
+# https://nexte.st/docs/configuration/reference/
+[profile.ci-test]
+
+# JUnit output for GitHub Actions annotations
+[profile.ci-test.junit]
+path = "junit.xml"
+store-failure-output = true
+store-success-output = false
